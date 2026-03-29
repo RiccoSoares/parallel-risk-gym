@@ -34,14 +34,19 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
         self.map_config = self._initialize_map()
         n_territories = self.map_config['n_territories']
 
+        # Calculate max possible income (base + all region bonuses)
+        max_income = income_per_turn + sum(self.map_config['region_bonuses'].values())
+
         # Define observation spaces
+        n_regions = len(self.map_config['regions'])
         self.observation_spaces = {
             agent: spaces.Dict({
                 'territory_ownership': spaces.Box(low=-1, high=1, shape=(n_territories,), dtype=np.int8),
                 'territory_troops': spaces.Box(low=0, high=100, shape=(n_territories,), dtype=np.int32),
                 'adjacency_matrix': spaces.Box(low=0, high=1, shape=(n_territories, n_territories), dtype=np.int8),
-                'available_income': spaces.Box(low=0, high=income_per_turn, shape=(1,), dtype=np.int32),
+                'available_income': spaces.Box(low=0, high=max_income, shape=(1,), dtype=np.int32),
                 'turn_number': spaces.Box(low=0, high=max_turns, shape=(1,), dtype=np.int32),
+                'region_control': spaces.Box(low=0, high=1, shape=(n_regions,), dtype=np.int8),
             })
             for agent in self.possible_agents
         }
@@ -67,9 +72,9 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
         """Initialize map structure - simple 6-territory grid"""
         if self.map_name == "simple_6":
             # Map layout:
-            # 0 - 1 - 2
+            # 0 - 1 - 2  (North region)
             # |   |   |
-            # 3 - 4 - 5
+            # 3 - 4 - 5  (South region)
             adjacency_list = {
                 0: [1, 3],
                 1: [0, 2, 4],
@@ -89,11 +94,27 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
             # Initial ownership: agent_0 gets [0, 1, 5], agent_1 gets [2, 3, 4]
             initial_ownership = np.array([0, 0, 1, 1, 1, 0], dtype=np.int8)
 
+            # Define bonus regions
+            regions = {
+                'north': [0, 1, 2],
+                'south': [3, 4, 5],
+                'center': [1, 4],
+            }
+
+            # Define bonus troops per region
+            region_bonuses = {
+                'north': 4,
+                'south': 4,
+                'center': 2,
+            }
+
             return {
                 'n_territories': n_territories,
                 'adjacency_list': adjacency_list,
                 'adjacency_matrix': adjacency_matrix,
                 'initial_ownership': initial_ownership,
+                'regions': regions,
+                'region_bonuses': region_bonuses,
             }
         else:
             raise ValueError(f"Unknown map name: {self.map_name}")
@@ -136,12 +157,20 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
             -1
         ).astype(np.int8)
 
+        # Check region control (1 if agent controls region, 0 otherwise)
+        controlled_regions = self._check_region_control(agent)
+        region_control = np.zeros(len(self.map_config['regions']), dtype=np.int8)
+        for i, region_name in enumerate(self.map_config['regions'].keys()):
+            if region_name in controlled_regions:
+                region_control[i] = 1
+
         return {
             'territory_ownership': ownership,
             'territory_troops': self.game_state['territory_troops'].copy(),
             'adjacency_matrix': self.map_config['adjacency_matrix'].copy(),
             'available_income': np.array([self.game_state['available_income'][agent]], dtype=np.int32),
             'turn_number': np.array([self.game_state['turn_number']], dtype=np.int32),
+            'region_control': region_control,
         }
 
     def _classify_action(self, source, dest):
@@ -152,6 +181,27 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
             return 'transfer'
         else:
             return 'attack'
+
+    def _check_region_control(self, agent):
+        """Check which regions are fully controlled by agent"""
+        agent_idx = self.possible_agents.index(agent)
+        controlled_regions = []
+
+        for region_name, territories in self.map_config['regions'].items():
+            if all(self.game_state['territory_ownership'][t] == agent_idx for t in territories):
+                controlled_regions.append(region_name)
+
+        return controlled_regions
+
+    def _calculate_income(self, agent):
+        """Calculate income for agent including region bonuses"""
+        base_income = self.income_per_turn
+
+        # Add region bonuses
+        controlled_regions = self._check_region_control(agent)
+        region_bonus = sum(self.map_config['region_bonuses'][region] for region in controlled_regions)
+
+        return base_income + region_bonus
 
     def _validate_action(self, action_info):
         """Validate if an action is legal based on current game state"""
@@ -288,13 +338,13 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
 
     def step(self, actions):
         """Process one turn of parallel actions"""
-        # Reset available income for each agent
+        # Calculate income for each agent based on region control
         for agent in self.agents:
-            self.game_state['available_income'][agent] = self.income_per_turn
+            self.game_state['available_income'][agent] = self._calculate_income(agent)
 
         # Parse all actions into a flat list with agent attribution
         all_actions = []
-        infos = {agent: {'invalid_actions': 0} for agent in self.agents}
+        infos = {agent: {'invalid_actions': 0, 'controlled_regions': [], 'income': 0} for agent in self.agents}
 
         for agent in self.agents:
             if agent not in actions:
@@ -330,6 +380,11 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
         # Increment turn counter
         self.game_state['turn_number'] += 1
 
+        # Store region control and income info AFTER actions processed
+        for agent in self.agents:
+            infos[agent]['controlled_regions'] = self._check_region_control(agent)
+            infos[agent]['income'] = self._calculate_income(agent)
+
         # Check termination conditions
         terminations, rewards = self._check_termination()
         truncations = {agent: False for agent in self.possible_agents}
@@ -357,11 +412,23 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
             troops = self.game_state['territory_troops'][i]
             print(f"  Territory {i}: {owner} ({troops} troops)")
 
-        print("\nAvailable Income:")
+        print("\nRegion Control:")
+        for agent in self.possible_agents:
+            controlled = self._check_region_control(agent)
+            if controlled:
+                bonuses = sum(self.map_config['region_bonuses'][r] for r in controlled)
+                print(f"  {agent}: {controlled} (+{bonuses} bonus troops)")
+            else:
+                print(f"  {agent}: None")
+
+        print("\nIncome (Base + Region Bonuses):")
         for agent in self.possible_agents:
             if agent in self.game_state['available_income']:
-                income = self.game_state['available_income'][agent]
-                print(f"  {agent}: {income}")
+                income = self._calculate_income(agent)
+                base = self.income_per_turn
+                bonus = income - base
+                print(f"  {agent}: {income} ({base} base + {bonus} bonus)")
+                print(f"    Available: {self.game_state['available_income'][agent]}")
 
     def observe(self, agent):
         """Return observation for specific agent"""
