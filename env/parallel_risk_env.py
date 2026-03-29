@@ -256,18 +256,29 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
         return False
 
     def _resolve_combat(self, attacking_troops, defending_troops):
-        """Resolve combat deterministically"""
-        attack_power = attacking_troops
-        defense_power = defending_troops * 1.5
+        """Resolve combat deterministically with percentage-based casualties
 
-        if attack_power > defense_power:
-            # Attacker wins
-            surviving_troops = max(1, int(attacking_troops - defending_troops * 0.5))
+        Rules:
+        - Defenders lose 60% of attacking troops
+        - Attackers lose 70% of defending troops
+        - If defenders reduced to 0 or below: attacker wins and captures territory
+        - Otherwise: defender holds with remaining troops
+        """
+        # Calculate casualties
+        defender_casualties = int(attacking_troops * 0.6)
+        attacker_casualties = int(defending_troops * 0.7)
+
+        # Apply casualties
+        defenders_remaining = defending_troops - defender_casualties
+        attackers_remaining = attacking_troops - attacker_casualties
+
+        if defenders_remaining <= 0:
+            # Attacker wins - captures territory with remaining troops
+            surviving_troops = max(1, attackers_remaining)
             return 'attacker_wins', surviving_troops
         else:
             # Defender holds
-            defender_losses = int(defending_troops * 0.3)
-            return 'defender_holds', max(0, defending_troops - defender_losses)
+            return 'defender_holds', defenders_remaining
 
     def _execute_action(self, action_info):
         """Execute a validated action"""
