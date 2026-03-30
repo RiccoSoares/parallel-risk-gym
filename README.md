@@ -214,17 +214,14 @@ env = ParallelRiskEnv(
 Run the test suites to verify functionality:
 
 ```bash
-# Test basic game mechanics
-python tests/test_mechanics.py
+# Run all tests
+python run_tests.py
 
-# Test combat system
-python tests/test_combat.py
-
-# Test region bonuses
-python tests/test_regions.py
-
-# Run random simulation
-python tests/test_run.py
+# Or run individual tests with PYTHONPATH
+PYTHONPATH=. python tests/test_mechanics.py
+PYTHONPATH=. python tests/test_combat.py
+PYTHONPATH=. python tests/test_regions.py
+PYTHONPATH=. python tests/test_run.py
 ```
 
 ## Strategic Considerations

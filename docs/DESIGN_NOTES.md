@@ -619,39 +619,6 @@ def _load_from_json(self, path):
 }
 ```
 
----
-
-### **5. Probabilistic Combat**
-
-Replace deterministic combat with dice-based:
-
-```python
-def _resolve_combat(self, attacking_troops, defending_troops):
-    """Probabilistic combat with binomial distribution"""
-    attacker_hit_rate = 0.6
-    defender_hit_rate = 0.7
-
-    attacker_hits = np.random.binomial(attacking_troops, attacker_hit_rate)
-    defender_hits = np.random.binomial(defending_troops, defender_hit_rate)
-
-    attacker_casualties = min(attacking_troops, defender_hits)
-    defender_casualties = min(defending_troops, attacker_hits)
-
-    attacker_remaining = attacking_troops - attacker_casualties
-    defender_remaining = defending_troops - defender_casualties
-
-    if attacker_remaining > defender_remaining:
-        return 'attacker_wins', attacker_remaining
-    else:
-        return 'defender_holds', defender_remaining
-```
-
-**Considerations:**
-- Makes training harder (stochastic outcomes)
-- Requires more samples for convergence
-- More realistic/engaging for humans
-
----
 
 ### **6. Reward Shaping**
 
