@@ -1,4 +1,4 @@
-from env.parallel_risk_env import ParallelRiskEnv
+from parallel_risk import ParallelRiskEnv
 import numpy as np
 
 def test_region_bonuses():

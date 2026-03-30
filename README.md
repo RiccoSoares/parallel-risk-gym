@@ -110,7 +110,7 @@ git clone <repository-url>
 cd parallel-risk-gym
 
 # Install dependencies
-pip install pettingzoo gymnasium numpy
+pip install -r requirements.txt
 ```
 
 ## Usage
@@ -118,7 +118,7 @@ pip install pettingzoo gymnasium numpy
 ### Basic Example
 
 ```python
-from env.parallel_risk_env import ParallelRiskEnv
+from parallel_risk import ParallelRiskEnv
 import numpy as np
 
 # Create environment
@@ -158,7 +158,7 @@ while env.agents:
 See `test_run.py` for a complete example with random policies:
 
 ```bash
-python test_run.py
+python tests/test_run.py
 ```
 
 ## Observation Space
@@ -215,16 +215,16 @@ Run the test suites to verify functionality:
 
 ```bash
 # Test basic game mechanics
-python test_mechanics.py
+python tests/test_mechanics.py
 
 # Test combat system
-python test_combat.py
+python tests/test_combat.py
 
 # Test region bonuses
-python test_regions.py
+python tests/test_regions.py
 
 # Run random simulation
-python test_run.py
+python tests/test_run.py
 ```
 
 ## Strategic Considerations
@@ -277,12 +277,12 @@ infos[agent] = {
 }
 ```
 
-For better RL training, implement action masking using the observation space (see `DESIGN_NOTES.md` for examples).
+For better RL training, implement action masking using the observation space (see `docs/DESIGN_NOTES.md` for examples).
 
 ## Documentation
 
-- **DESIGN_NOTES.md** - Detailed design decisions, alternative approaches, and extension possibilities
-- **COMBAT_SYSTEM.md** - Complete combat mechanics documentation with examples
+- **docs/DESIGN_NOTES.md** - Detailed design decisions, alternative approaches, and extension possibilities
+- **docs/COMBAT_SYSTEM.md** - Complete combat mechanics documentation with examples
 
 ## Training RL Agents
 

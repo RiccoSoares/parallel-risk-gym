@@ -1,11 +1,11 @@
-from env.parallel_risk_env import ParallelRiskEnv
+from parallel_risk import ParallelRiskEnv
 import numpy as np
 
 def random_policy(env, agent):
     """Generate random valid actions for an agent"""
     action_space = env.action_spaces[agent]
     max_actions = action_space['num_actions'].n - 1  # Max num_actions value
-    n_territories = env.map_config['n_territories']
+    n_territories = env.map_config.n_territories
 
     # Random number of actions (0 to max_actions)
     num_actions = np.random.randint(0, max_actions + 1)
