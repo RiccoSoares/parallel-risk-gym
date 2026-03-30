@@ -26,7 +26,7 @@ This document contains research findings and design decisions for modeling the P
   - **Attack** `(x, y, troops)`: Attack enemy-owned territory
 - **Income**: Fixed per turn (e.g., 5 troops), can be split across deployments
 - **Action resolution**: Shuffle all actions randomly, process sequentially, discard invalid ones
-- **Combat**: Deterministic ratio-based (defender gets 1.5x multiplier)
+- **Combat**: Deterministic percentage-based (60% defender casualties, 70% attacker casualties)
 - **Victory**: Last player with territories wins
 
 ### Key Challenges
@@ -522,7 +522,7 @@ def _get_valid_actions(self, agent):
         if available_troops <= 0:
             continue
 
-        for dest in np.where(self.map_config['adjacency_matrix'][source] == 1)[0]:
+        for dest in np.where(self.map_config.adjacency_matrix[source] == 1)[0]:
             for troops in range(1, available_troops + 1):
                 valid.append((source, dest, troops))
 
@@ -558,71 +558,82 @@ def _calculate_income(self, agent):
 
 ---
 
-### **3. Territory Bonuses / Regions**
+### **3. Territory Bonuses / Regions** ✅ IMPLEMENTED
+
+Already implemented in the current version! See `parallel_risk/env/map_config.py` for region definitions.
 
 ```python
-# Add to map_config
-'regions': {
+# Example from create_simple_6_map()
+regions = {
     'north': [0, 1, 2],
     'south': [3, 4, 5],
-},
-'region_bonuses': {
-    'north': 2,
-    'south': 2,
+    'center': [1, 4],
 }
-
-def _calculate_income(self, agent):
-    income = base_income
-
-    # Check region control
-    for region, territories in self.map_config['regions'].items():
-        if all(self.game_state['territory_ownership'][t] == agent_idx
-               for t in territories):
-            income += self.map_config['region_bonuses'][region]
-
-    return income
+region_bonuses = {
+    'north': 4,
+    'south': 4,
+    'center': 2,
+}
 ```
 
-**Impact on observation space:**
-- Add `region_control` indicator
-- Or keep implicit (network learns from ownership)
+Income calculation in `parallel_risk_env.py` checks region control and adds bonuses automatically.
 
 ---
 
-### **4. Multiple Map Support**
+### **4. Multiple Map Support** ✅ IMPLEMENTED
+
+Already implemented via MapRegistry! See `parallel_risk/env/map_config.py`.
+
+**Adding a new map:**
 
 ```python
-# Add map loader
-def _initialize_map(self):
-    if self.map_name == "simple_6":
-        return self._load_simple_6()
-    elif self.map_name == "classic_42":
-        return self._load_from_json(f"maps/{self.map_name}.json")
+# In parallel_risk/env/map_config.py
 
-def _load_from_json(self, path):
-    with open(path) as f:
-        config = json.load(f)
-    # config format: {territories, adjacency, initial_ownership, regions, ...}
-    return self._build_map_config(config)
-```
+def create_custom_map():
+    """Define your custom map"""
+    adjacency_list = {
+        0: [1, 3],
+        1: [0, 2, 4],
+        # ... define connections
+    }
 
-**JSON Format:**
-```json
-{
-  "n_territories": 6,
-  "adjacency": [[0,1], [1,2], [0,3], [1,4], [2,5], [3,4], [4,5]],
-  "initial_ownership": {
-    "agent_0": [0, 1, 5],
-    "agent_1": [2, 3, 4]
-  },
-  "initial_troops": 3
-}
+    # Build adjacency matrix
+    adjacency_matrix = np.zeros((n_territories, n_territories), dtype=np.int8)
+    for source, neighbors in adjacency_list.items():
+        for neighbor in neighbors:
+            adjacency_matrix[source, neighbor] = 1
+
+    # Define initial ownership
+    initial_ownership = np.array([0, 0, 1, 1, ...], dtype=np.int8)
+
+    # Define regions
+    regions = {
+        'region_name': [0, 1, 2],
+    }
+    region_bonuses = {
+        'region_name': 3,
+    }
+
+    return MapConfig(
+        n_territories=n_territories,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+# Register it
+MapRegistry.register("custom_map", create_custom_map)
+
+# Use it
+env = ParallelRiskEnv(map_name="custom_map")
 ```
 
 
 ### **6. Reward Shaping**
 
-Current: +1 for win, -1 for loss, 0 during game
+Current: +1 for win, -1 for loss, +0.5/-0.5 for turn limit, 0 during game
 
 Enhanced:
 ```python
@@ -866,17 +877,18 @@ envs = SubprocVecEnv([lambda: ParallelRiskEnv() for _ in range(4)])
 
 ### Current Design
 - **Action Space**: Dict with length indicator (10 max actions)
-- **Observation Space**: Dict with full game info
-- **Validation**: Post-hoc (discard invalid)
-- **Combat**: Deterministic ratio-based
-- **Map**: Hard-coded 6-territory grid
+- **Observation Space**: Dict with full game info (agent-relative)
+- **Validation**: Post-hoc (discard invalid) - centralized in ActionValidator
+- **Combat**: Deterministic percentage-based (60%/70% casualties) - isolated in CombatResolver
+- **Map**: Modular MapRegistry system with simple_6 default
+- **Regions**: Region bonuses implemented (+4 for north/south, +2 for center)
 
 ### Best for Extensions
-1. **Better training**: Add action masking to info dict
-2. **More maps**: Implement JSON map loader
-3. **Scalability**: Convert observation to graph-based
-4. **Realism**: Add fog of war, probabilistic combat
-5. **Complexity**: Variable income, territory bonuses, regions
+1. **Better training**: Add action masking to info dict (see extension #1)
+2. **More maps**: Add functions to MapRegistry in map_config.py (see extension #4)
+3. **Scalability**: Convert observation to graph-based for variable map sizes
+4. **Realism**: Add fog of war, probabilistic combat (extend CombatResolver)
+5. **Complexity**: 3-4 players (update initial_ownership in maps)
 
 ### Key Takeaway
-The current design optimizes for **simplicity and compatibility**. It uses well-established patterns (Dict spaces, post-hoc validation) that work with all major RL frameworks. When extending, maintain backward compatibility by adding optional features rather than changing core structure.
+The current design optimizes for **simplicity and compatibility** with a **modular architecture**. It uses well-established patterns (Dict spaces, post-hoc validation) that work with all major RL frameworks. The refactored structure (MapRegistry, CombatResolver, ActionValidator) makes extensions easy without touching core environment code. When extending, maintain backward compatibility by adding optional features rather than changing core structure.

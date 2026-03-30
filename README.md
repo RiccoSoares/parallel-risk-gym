@@ -278,8 +278,12 @@ For better RL training, implement action masking using the observation space (se
 
 ## Documentation
 
+## Documentation
+
+- **CLAUDE.md** - Guide for Claude Code agents working on this project (architecture decisions, how to extend, common gotchas)
 - **docs/DESIGN_NOTES.md** - Detailed design decisions, alternative approaches, and extension possibilities
 - **docs/COMBAT_SYSTEM.md** - Complete combat mechanics documentation with examples
+- **REFACTORING_SUMMARY.md** - History of the modular refactoring (monolithic → modular structure)
 
 ## Training RL Agents
 

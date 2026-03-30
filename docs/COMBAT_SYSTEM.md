@@ -60,7 +60,7 @@ To capture a territory, attacker needs:
 
 ### Testing
 
-**Test file:** `test_combat.py`
+**Test file:** `tests/test_combat.py`
 
 Covers:
 - ✅ Attacker wins scenario (10 vs 5)
