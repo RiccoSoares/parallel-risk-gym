@@ -1,7 +1,7 @@
 # RL Training Roadmap
 
 **Last Updated:** 2026-04-07  
-**Status:** Planning Phase
+**Status:** Phase 1 Complete (Steps 1-2), Phase 2 Planned
 
 ## Overview
 
@@ -499,14 +499,47 @@ experiments/                      # NEW: Experiment logs and results
 - [ ] Benchmark environment for multi-agent GNN research
 - [ ] Reproducible codebase for community use
 
+## Phase 1 Progress
+
+### Completed:
+- [x] **Phase 1.1: Reward Shaping** - Fully implemented with 4 configurable components
+  - Created `parallel_risk/env/reward_shaping.py` with RewardShaper class
+  - Territory control, region completion, troop advantage, strategic position rewards
+  - Preset configurations (dense, sparse, territorial, aggressive)
+  - Unit tests in `tests/test_reward_shaping.py`
+  - Documentation in `docs/REWARD_SHAPING.md`
+
+- [x] **Phase 1.2: RLlib Integration** - Training pipeline ready
+  - Created `parallel_risk/training/rllib_wrapper.py` with fixed-budget action space
+  - Training script `parallel_risk/training/train_rllib.py` with CLI
+  - Configuration system via YAML (`configs/ppo_baseline.yaml`)
+  - Unit tests in `tests/test_rllib_wrapper.py`
+  - Documentation in `docs/RLLIB_INTEGRATION.md`
+
+### In Progress:
+- **Phase 1.3-1.4: Evaluation & Experiments** - Ready to begin full training runs
+  - Infrastructure complete, can start baseline training
+  - Need to implement tournament system for agent evaluation
+  - Need to run ablation studies on reward shaping
+
 ## Next Steps
 
-**Immediate:** Start with reward shaping implementation
-1. Create `parallel_risk/env/reward_shaping.py`
-2. Implement 4 shaped reward components with tunable coefficients
-3. Add config flag to enable/disable reward shaping
-4. Write unit tests for reward calculation
-5. Manual testing: play games and verify rewards align with strategy
+**Immediate:** Phase 1.3 - Evaluation Harness
+1. Create `parallel_risk/evaluation/` directory
+2. Implement tournament system for head-to-head matches
+3. Add Elo rating tracking
+4. Create visualization tools for training curves
+
+**Short-term:** Phase 1.4 - Baseline Experiments
+1. Run full training with different reward shaping configs
+2. Compare sparse vs. dense rewards
+3. Measure win rates against random/heuristic baselines
+4. Document best configuration and hyperparameters
+
+**Long-term:** Phase 2 - Graph Neural Networks
+1. Start with graph observation wrapper (PyG format)
+2. Implement GNN policy architectures (GCN, GAT, GraphSAGE)
+3. Multi-map training experiments
 
 **References for Implementation:**
 - OpenAI Five reward shaping: https://openai.com/research/openai-five

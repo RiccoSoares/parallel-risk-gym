@@ -37,7 +37,7 @@ Flattened vector containing:
 
 Total size: `2*n_territories + n_territories² + 2 + n_regions`
 
-For simple_6 map: 6 territories, 2 regions → **50 dimensions**
+For simple_6 map: 6 territories, 3 regions → **53 dimensions**
 
 ### 2. Training Script
 **File:** `parallel_risk/training/train_rllib.py`
