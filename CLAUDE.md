@@ -52,19 +52,44 @@ parallel_risk/
 ├── __init__.py               # Exports ParallelRiskEnv
 ├── parallel_risk_v0.py       # Entry point (PettingZoo convention)
 └── env/
-    ├── parallel_risk_env.py  # Core environment (317 lines)
+    ├── parallel_risk_env.py  # Core environment (330 lines)
     ├── map_config.py         # Map definitions (92 lines)
     ├── combat.py             # Combat resolver (37 lines)
-    └── validators.py         # Action validation (100 lines)
+    ├── validators.py         # Action validation (100 lines)
+    └── reward_shaping.py     # RL reward shaping (320 lines)
 ```
 
 **Why:** Extracted map definitions, combat logic, and validation into separate modules to make extensions easier without touching core environment.
 
+### 6. Reward Shaping (Optional)
+
+For RL training, dense reward signals are available via `reward_shaping_config`:
+
+```python
+from parallel_risk.env.reward_shaping import create_dense_config
+
+env = ParallelRiskEnv(reward_shaping_config=create_dense_config())
+```
+
+Four reward components can be enabled independently:
+- **Territory control:** Reward for % of map controlled
+- **Region completion:** One-time bonus when completing regions
+- **Troop advantage:** Reward for troop count ratio over opponent
+- **Strategic position:** Reward for controlling well-connected territories
+
+**Why optional:** Some RL algorithms handle sparse rewards well. Shaped rewards can accelerate learning but must be tuned carefully to avoid perverse incentives. All shaped rewards are scaled << 1.0 to keep terminal win/loss rewards dominant.
+
 ## Project Structure
 
 - **parallel_risk/** - Main package
-- **tests/** - Test suite (mechanics, combat, regions, run)
-- **docs/** - Design documentation (DESIGN_NOTES.md, COMBAT_SYSTEM.md)
+  - **env/** - Environment components (core, maps, combat, validation, reward shaping)
+- **tests/** - Test suite (mechanics, combat, regions, run, reward_shaping)
+- **examples/** - Usage examples (reward_shaping_demo.py)
+- **docs/** - Design documentation
+  - DESIGN_NOTES.md - Deep dive into design decisions
+  - COMBAT_SYSTEM.md - Complete combat mechanics
+  - REWARD_SHAPING.md - RL reward shaping guide
+  - RL_TRAINING_ROADMAP.md - Plan for RL training implementation
 - **requirements.txt** - Pinned dependencies (PettingZoo 1.25.0, Gymnasium 1.2.3, NumPy 2.3.5)
 - **run_tests.py** - Convenience script to run all tests
 
@@ -113,6 +138,35 @@ Edit `parallel_risk/env/combat.py` only. The CombatResolver is isolated and inde
 
 Edit `parallel_risk/env/validators.py`. All validation logic is centralized in the ActionValidator class.
 
+### Using Reward Shaping for RL Training
+
+See `docs/REWARD_SHAPING.md` for complete guide. Quick start:
+
+```python
+from parallel_risk.env.reward_shaping import create_dense_config
+
+# Enable all reward components with default weights
+env = ParallelRiskEnv(reward_shaping_config=create_dense_config())
+
+# Or customize
+from parallel_risk.env.reward_shaping import RewardShapingConfig
+
+config = RewardShapingConfig(
+    enable_territory_control=True,
+    enable_region_completion=True,
+    territory_control_weight=0.02,
+    region_completion_weight=0.15,
+)
+env = ParallelRiskEnv(reward_shaping_config=config)
+```
+
+Reward component details available in `infos` for debugging:
+```python
+obs, rewards, terms, truncs, infos = env.step(actions)
+print(infos['agent_0']['reward_components'])
+# {'territory_control': 0.005, 'region_completion': 0.0, ...}
+```
+
 ## Common Gotchas
 
 1. **MapConfig is a dataclass, not a dict** - Use `map_config.n_territories`, not `map_config['n_territories']`
@@ -129,6 +183,8 @@ Edit `parallel_risk/env/validators.py`. All validation logic is centralized in t
 
 - **docs/DESIGN_NOTES.md** - Deep dive into design decisions, alternative approaches considered, 10+ extension possibilities with code examples
 - **docs/COMBAT_SYSTEM.md** - Complete combat mechanics with mathematical analysis
+- **docs/REWARD_SHAPING.md** - RL reward shaping guide with component details, tuning guidelines, and validation checklist
+- **docs/RL_TRAINING_ROADMAP.md** - Two-phase plan for RL training: baseline with flat observations → graph neural networks for multi-map training
 - **REFACTORING_SUMMARY.md** - Detailed refactoring history (monolithic → modular structure)
 
 
