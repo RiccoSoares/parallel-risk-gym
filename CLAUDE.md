@@ -83,14 +83,17 @@ Four reward components can be enabled independently:
 
 - **parallel_risk/** - Main package
   - **env/** - Environment components (core, maps, combat, validation, reward shaping)
-- **tests/** - Test suite (mechanics, combat, regions, run, reward_shaping)
+  - **training/** - RLlib training infrastructure (wrapper, training script, configs)
+- **tests/** - Test suite (mechanics, combat, regions, run, reward_shaping, rllib_wrapper)
 - **examples/** - Usage examples (reward_shaping_demo.py)
 - **docs/** - Design documentation
   - DESIGN_NOTES.md - Deep dive into design decisions
   - COMBAT_SYSTEM.md - Complete combat mechanics
   - REWARD_SHAPING.md - RL reward shaping guide
-  - RL_TRAINING_ROADMAP.md - Plan for RL training implementation
-- **requirements.txt** - Pinned dependencies (PettingZoo 1.25.0, Gymnasium 1.2.3, NumPy 2.3.5)
+  - RLLIB_INTEGRATION.md - RLlib training guide
+  - RL_TRAINING_ROADMAP.md - Two-phase RL training plan
+- **requirements.txt** - Dependencies (includes RLlib/Ray for training)
+- **install_training_deps.sh** - Install training dependencies
 - **run_tests.py** - Convenience script to run all tests
 
 ## Running Tests
@@ -101,7 +104,45 @@ python run_tests.py
 
 # Or individual tests
 PYTHONPATH=. python tests/test_mechanics.py
+PYTHONPATH=. python tests/test_reward_shaping.py
+
+# Test RLlib wrapper (requires Ray installed)
+PYTHONPATH=. python tests/test_rllib_wrapper.py
 ```
+
+## Training RL Agents
+
+### Installation
+
+Install training dependencies (Ray/RLlib, PyTorch, TensorBoard):
+```bash
+./install_training_deps.sh
+# or: pip install -r requirements.txt
+```
+
+### Quick Start
+
+```bash
+# Test training (10 iterations, ~5 minutes)
+python -m parallel_risk.training.train_rllib \
+    --config parallel_risk/training/configs/ppo_baseline.yaml \
+    --num-iterations 10 \
+    --num-workers 2
+
+# Full training run
+python -m parallel_risk.training.train_rllib \
+    --config parallel_risk/training/configs/ppo_baseline.yaml
+```
+
+### Configuration
+
+Edit `parallel_risk/training/configs/ppo_baseline.yaml` to customize:
+- Environment (map, action budget, reward shaping)
+- PPO hyperparameters (learning rate, clip param, etc.)
+- Training settings (workers, batch size, GPUs)
+- Network architecture
+
+See `docs/RLLIB_INTEGRATION.md` for complete guide.
 
 ## Adding New Features
 
@@ -184,8 +225,10 @@ print(infos['agent_0']['reward_components'])
 - **docs/DESIGN_NOTES.md** - Deep dive into design decisions, alternative approaches considered, 10+ extension possibilities with code examples
 - **docs/COMBAT_SYSTEM.md** - Complete combat mechanics with mathematical analysis
 - **docs/REWARD_SHAPING.md** - RL reward shaping guide with component details, tuning guidelines, and validation checklist
-- **docs/RL_TRAINING_ROADMAP.md** - Two-phase plan for RL training: baseline with flat observations → graph neural networks for multi-map training
-- **REFACTORING_SUMMARY.md** - Detailed refactoring history (monolithic → modular structure)
+- **docs/RLLIB_INTEGRATION.md** - Complete guide to training with RLlib: installation, configuration, troubleshooting
+- **docs/RL_TRAINING_ROADMAP.md** - Two-phase plan for RL training: Phase 1 (RLlib baseline) complete, Phase 2 (GNN) planned
+- **docs/REWARD_SHAPING_SUMMARY.md** - Implementation summary for reward shaping (Phase 1.1)
+- **docs/RLLIB_INTEGRATION_SUMMARY.md** - Implementation summary for RLlib integration (Phase 1.2)
 
 
 ## Code Style Preferences
