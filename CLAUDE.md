@@ -227,8 +227,8 @@ print(infos['agent_0']['reward_components'])
 - **docs/REWARD_SHAPING.md** - RL reward shaping guide with component details, tuning guidelines, and validation checklist
 - **docs/RLLIB_INTEGRATION.md** - Complete guide to training with RLlib: installation, configuration, troubleshooting
 - **docs/RL_TRAINING_ROADMAP.md** - Two-phase plan for RL training: Phase 1 (RLlib baseline) complete, Phase 2 (GNN) planned
-- **REFACTORING_SUMMARY.md** - Detailed refactoring history (monolithic → modular structure)
-- **REWARD_SHAPING_SUMMARY.md** - Implementation summary for reward shaping
+- **docs/REWARD_SHAPING_SUMMARY.md** - Implementation summary for reward shaping (Phase 1.1)
+- **docs/RLLIB_INTEGRATION_SUMMARY.md** - Implementation summary for RLlib integration (Phase 1.2)
 
 
 ## Code Style Preferences

@@ -199,6 +199,9 @@ Only the first `num_actions` rows of the `actions` array are processed.
 ## Environment Configuration
 
 ```python
+from parallel_risk import ParallelRiskEnv
+from parallel_risk.env.reward_shaping import create_dense_config
+
 env = ParallelRiskEnv(
     map_name="simple_6",              # Map configuration
     max_actions_per_turn=10,          # Max actions per player per turn
@@ -206,8 +209,19 @@ env = ParallelRiskEnv(
     max_turns=100,                    # Turn limit
     initial_troops_per_territory=3,   # Starting troops
     seed=None,                        # Random seed
+    reward_shaping_config=None,       # Optional: create_dense_config() for shaped rewards
 )
 ```
+
+**Reward Shaping Options:**
+- `None` - Sparse rewards only (default, +1/-1 for win/loss)
+- `create_sparse_config()` - Explicitly no shaping
+- `create_dense_config()` - All reward components enabled
+- `create_territorial_config()` - Territory + region rewards only
+- `create_aggressive_config()` - Troop + strategic rewards only
+- Custom `RewardShapingConfig(...)` - Fine-tune individual components
+
+See `docs/REWARD_SHAPING.md` for details.
 
 ## Testing
 
@@ -222,6 +236,8 @@ PYTHONPATH=. python tests/test_mechanics.py
 PYTHONPATH=. python tests/test_combat.py
 PYTHONPATH=. python tests/test_regions.py
 PYTHONPATH=. python tests/test_run.py
+PYTHONPATH=. python tests/test_reward_shaping.py
+PYTHONPATH=. python tests/test_rllib_wrapper.py  # Requires Ray/RLlib
 ```
 
 ## Strategic Considerations
@@ -278,18 +294,83 @@ For better RL training, implement action masking using the observation space (se
 
 ## Documentation
 
-## Documentation
-
-- **CLAUDE.md** - Guide for Claude Code agents working on this project (architecture decisions, how to extend, common gotchas)
+- **CLAUDE.md** - Guide for Claude Code agents working on this project
 - **docs/DESIGN_NOTES.md** - Detailed design decisions, alternative approaches, and extension possibilities
 - **docs/COMBAT_SYSTEM.md** - Complete combat mechanics documentation with examples
-- **REFACTORING_SUMMARY.md** - History of the modular refactoring (monolithic → modular structure)
+- **docs/REWARD_SHAPING.md** - Guide to reward shaping for RL training
+- **docs/RLLIB_INTEGRATION.md** - Complete guide to training with RLlib
+- **docs/RL_TRAINING_ROADMAP.md** - Two-phase plan for RL training (baseline → GNN)
+- **docs/REWARD_SHAPING_SUMMARY.md** - Implementation summary for reward shaping
+- **docs/RLLIB_INTEGRATION_SUMMARY.md** - Implementation summary for RLlib integration
 
 ## Training RL Agents
 
-The environment follows the PettingZoo Parallel API standard, which is designed to work with multi-agent RL frameworks.
+The environment is ready for training reinforcement learning agents with **RLlib/PPO** and optional **reward shaping**.
 
-**Note:** Integration with specific RL frameworks (Stable-Baselines3, RLlib, etc.) has not yet been tested. See PettingZoo's [training documentation](https://pettingzoo.farama.org/tutorials/sb3/) for guidance on integrating PettingZoo environments with your framework of choice.
+### Quick Start
+
+```bash
+# Install training dependencies
+./install_training_deps.sh
+
+# Run quick test (2 iterations, ~20 seconds)
+python -m parallel_risk.training.train_rllib \
+    --config parallel_risk/training/configs/ppo_baseline.yaml \
+    --num-iterations 2 \
+    --num-workers 1
+
+# Full training (1000 iterations, ~12-24 hours)
+python -m parallel_risk.training.train_rllib \
+    --config parallel_risk/training/configs/ppo_baseline.yaml
+```
+
+### Features
+
+**Environment Wrapper:**
+- Converts PettingZoo ParallelEnv to RLlib MultiAgentEnv
+- Flattens Dict observations to vectors (53 dims for simple_6)
+- Fixed action budget (default: 5 actions per turn)
+- Supports reward shaping configuration
+
+**Reward Shaping (Optional):**
+Four configurable components to accelerate learning:
+- **Territory control** - Reward for % of map controlled
+- **Region completion** - One-time bonuses for completing regions
+- **Troop advantage** - Reward for troop count ratio
+- **Strategic position** - Reward for controlling well-connected territories
+
+```python
+from parallel_risk import ParallelRiskEnv
+from parallel_risk.env.reward_shaping import create_dense_config
+
+# With reward shaping
+env = ParallelRiskEnv(reward_shaping_config=create_dense_config())
+
+# Without reward shaping (sparse rewards only)
+env = ParallelRiskEnv()
+```
+
+**Training Configuration:**
+Edit `parallel_risk/training/configs/ppo_baseline.yaml` to customize:
+- Environment settings (map, action budget, reward shaping)
+- PPO hyperparameters (learning rate, clip param, entropy)
+- Training settings (workers, batch size, GPUs)
+- Network architecture (hidden layers, activation)
+
+**Documentation:**
+- **docs/RLLIB_INTEGRATION.md** - Complete training guide
+- **docs/REWARD_SHAPING.md** - Reward shaping details
+- **docs/RL_TRAINING_ROADMAP.md** - Training roadmap and next steps
+
+### Testing
+
+```bash
+# Test environment wrapper
+PYTHONPATH=. python tests/test_rllib_wrapper.py
+
+# Test reward shaping
+PYTHONPATH=. python tests/test_reward_shaping.py
+```
 
 
 ## License
