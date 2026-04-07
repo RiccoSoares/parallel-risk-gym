@@ -1,0 +1,58 @@
+# PPO with Sparse Rewards Only (Terminal Win/Loss)
+# This is the hardest learning scenario - no intermediate feedback
+
+# Environment settings
+env:
+  map_name: "simple_6"
+  max_turns: 100
+  action_budget: 5
+  reward_shaping: "sparse"  # Terminal rewards only
+
+# Training settings
+training:
+  num_workers: 4
+  num_envs_per_worker: 1
+  num_gpus: 0
+  train_batch_size: 4000
+  sgd_minibatch_size: 128
+  num_sgd_iter: 10
+
+# PPO hyperparameters
+ppo:
+  gamma: 0.99
+  lambda: 0.95
+  clip_param: 0.2
+  vf_clip_param: 10.0
+  entropy_coeff: 0.01
+  lr: 3.0e-4
+  lr_schedule: null
+
+# Network architecture
+model:
+  fcnet_hiddens: [256, 256]
+  fcnet_activation: "relu"
+  vf_share_layers: false
+
+# Self-play settings
+self_play:
+  enabled: true
+  policy_pool_size: 5
+  win_rate_threshold: 0.7
+  policy_mapping_fn: "main_vs_pool"
+
+# Checkpointing and logging
+checkpoint:
+  frequency: 1  # Save every iteration (for detailed learning curves)
+  keep: 20  # Keep last 20 checkpoints
+
+logging:
+  log_level: "INFO"
+  tensorboard: true
+  wandb: false
+  wandb_project: "parallel-risk"
+
+# Stop conditions
+stop:
+  training_iteration: 1000
+  timesteps_total: 5000000
+  episode_reward_mean: 0.8
