@@ -105,10 +105,6 @@ The game ends when:
 ## Installation
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd parallel-risk-gym
-
 # Install dependencies
 pip install -r requirements.txt
 ```
@@ -155,10 +151,10 @@ while env.agents:
 
 ### Random Policy Example
 
-See `test_run.py` for a complete example with random policies:
+See `tests/test_run.py` for a complete example with random policies:
 
 ```bash
-python tests/test_run.py
+PYTHONPATH=. python tests/test_run.py
 ```
 
 ## Observation Space
@@ -267,16 +263,28 @@ PYTHONPATH=. python tests/test_rllib_wrapper.py  # Requires Ray/RLlib
 
 ### Custom Maps
 
-Add new maps by extending `_initialize_map()`:
+Add new maps by registering them in `parallel_risk/env/map_config.py`:
 
 ```python
-def _initialize_map(self):
-    if self.map_name == "custom_8":
-        adjacency_list = {...}
-        regions = {...}
-        region_bonuses = {...}
-        # ... return map_config
+def create_custom_8_map():
+    adjacency_list = {...}
+    regions = {...}
+    region_bonuses = {...}
+    # Build adjacency matrix, initial ownership
+    
+    return MapConfig(
+        n_territories=8,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+MapRegistry.register("custom_8", create_custom_8_map)
 ```
+
+Then use: `env = ParallelRiskEnv(map_name="custom_8")`
 
 ### Action Masking
 
@@ -313,13 +321,13 @@ The environment is ready for training reinforcement learning agents with **RLlib
 # Install training dependencies
 ./install_training_deps.sh
 
-# Run quick test (2 iterations, ~20 seconds)
+# Run quick test (10 iterations, ~5 minutes)
 python -m parallel_risk.training.train_rllib \
     --config parallel_risk/training/configs/ppo_baseline.yaml \
-    --num-iterations 2 \
-    --num-workers 1
+    --num-iterations 10 \
+    --num-workers 2
 
-# Full training (1000 iterations, ~12-24 hours)
+# Full training (1000 iterations, from config)
 python -m parallel_risk.training.train_rllib \
     --config parallel_risk/training/configs/ppo_baseline.yaml
 ```
@@ -328,8 +336,8 @@ python -m parallel_risk.training.train_rllib \
 
 **Environment Wrapper:**
 - Converts PettingZoo ParallelEnv to RLlib MultiAgentEnv
-- Flattens Dict observations to vectors (53 dims for simple_6)
-- Fixed action budget (default: 5 actions per turn)
+- Flattens Dict observations to vectors
+- Configurable action budget (default: 5 actions per turn)
 - Supports reward shaping configuration
 
 **Reward Shaping (Optional):**
