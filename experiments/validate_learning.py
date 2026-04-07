@@ -163,7 +163,7 @@ def discover_checkpoints(checkpoint_dir):
 
     checkpoints = []
 
-    # Check for numbered checkpoint subdirectories (checkpoint_000100, etc.)
+    # Check for numbered checkpoint subdirectories (checkpoint_000010, etc.)
     for item in checkpoint_dir.iterdir():
         if item.is_dir() and item.name.startswith("checkpoint_"):
             # Extract iteration number
@@ -172,18 +172,6 @@ def discover_checkpoints(checkpoint_dir):
                 checkpoints.append((iteration, item))
             except (IndexError, ValueError):
                 continue
-
-    # If no numbered checkpoints found, check for a single checkpoint directory
-    # (RLlib saves to the same directory repeatedly when not using Tune)
-    if not checkpoints:
-        # Check if checkpoint_dir itself is a valid checkpoint
-        rllib_checkpoint = checkpoint_dir / "rllib_checkpoint.json"
-        if rllib_checkpoint.exists():
-            # Single checkpoint at the final iteration - we can only evaluate this
-            print(f"  Note: Found single checkpoint (no iteration subdirectories)")
-            print(f"  This is the final checkpoint from training")
-            # Return checkpoint for final iteration only
-            return [(10, checkpoint_dir)]  # Assuming 10 is the last iteration
 
     checkpoints.sort(key=lambda x: x[0])
     return checkpoints

@@ -42,8 +42,8 @@ self_play:
 
 # Checkpointing and logging
 checkpoint:
-  frequency: 10
-  keep: 5
+  frequency: 1  # Save every iteration (for detailed learning curves)
+  keep: 20  # Keep last 20 checkpoints
 
 logging:
   log_level: "INFO"

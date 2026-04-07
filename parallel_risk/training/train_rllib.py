@@ -228,7 +228,9 @@ def train(
 
             # Checkpoint
             if iteration % checkpoint_freq == 0:
-                checkpoint_path = algo.save(checkpoint_dir)
+                # Save to iteration-specific subdirectory
+                iteration_checkpoint_dir = os.path.join(checkpoint_dir, f"checkpoint_{iteration:06d}")
+                checkpoint_path = algo.save(iteration_checkpoint_dir)
                 print(f"  💾 Checkpoint saved: {checkpoint_path}")
 
                 # Save best checkpoint separately
@@ -255,8 +257,9 @@ def train(
         print("\n⚠️  Training interrupted by user")
 
     finally:
-        # Save final checkpoint
-        final_path = algo.save(checkpoint_dir)
+        # Save final checkpoint with iteration number
+        final_checkpoint_dir = os.path.join(checkpoint_dir, f"checkpoint_{iteration:06d}")
+        final_path = algo.save(final_checkpoint_dir)
         print(f"\n💾 Final checkpoint saved: {final_path}")
 
         # Cleanup

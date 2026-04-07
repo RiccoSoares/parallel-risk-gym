@@ -1,0 +1,12 @@
+{
+  "win_rate": 0.53,
+  "loss_rate": 0.47,
+  "draw_rate": 0.0,
+  "wins": 53,
+  "losses": 47,
+  "draws": 0,
+  "total_episodes": 100,
+  "avg_episode_length": 71.04,
+  "std_episode_length": 24.94510773678879,
+  "note": "Empirical baseline - two random agents"
+}
