@@ -104,6 +104,7 @@ Edit `parallel_risk/training/configs/ppo_baseline.yaml` to customize:
 - [docs/VALIDATION_EXPERIMENT.md](docs/VALIDATION_EXPERIMENT.md) - Validate that agents can learn
 - [docs/RLLIB_INTEGRATION.md](docs/RLLIB_INTEGRATION.md) - Complete training setup and troubleshooting
 - [docs/REWARD_SHAPING.md](docs/REWARD_SHAPING.md) - Reward component details and tuning
+- [docs/VISUALIZATION.md](docs/VISUALIZATION.md) - Plot generation and analysis
 - [docs/RL_TRAINING_ROADMAP.md](docs/RL_TRAINING_ROADMAP.md) - Project roadmap and next steps
 
 ## Basic Usage
@@ -302,6 +303,7 @@ For improved training efficiency, implement action masking using the observation
 - [docs/COMBAT_SYSTEM.md](docs/COMBAT_SYSTEM.md) - Combat mechanics deep dive
 - [docs/REWARD_SHAPING.md](docs/REWARD_SHAPING.md) - Reward shaping guide
 - [docs/RLLIB_INTEGRATION.md](docs/RLLIB_INTEGRATION.md) - RLlib training guide
+- [docs/VISUALIZATION.md](docs/VISUALIZATION.md) - Plot generation and analysis
 - [docs/RL_TRAINING_ROADMAP.md](docs/RL_TRAINING_ROADMAP.md) - Training roadmap
 
 ## License
