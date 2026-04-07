@@ -55,6 +55,9 @@ def evaluate_policy(
     if verbose:
         print(f"Loading policy from {policy_checkpoint_path}...")
 
+    # Convert to absolute path if needed
+    policy_checkpoint_path = str(Path(policy_checkpoint_path).resolve())
+
     algorithm = PPO.from_checkpoint(policy_checkpoint_path)
 
     # Create environment
@@ -67,7 +70,7 @@ def evaluate_policy(
     env = make_rllib_env(env_config)
 
     # Get map info for random agent
-    n_territories = env.env.env.map_config.n_territories
+    n_territories = env.env.map_config.n_territories
 
     # Create opponent
     if opponent == "random":
