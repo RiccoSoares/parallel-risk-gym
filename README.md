@@ -1,121 +1,92 @@
 # Parallel Risk Gym
 
-A PettingZoo-compatible multi-agent reinforcement learning environment implementing a Risk-like strategy game with parallel (simultaneous) turn resolution.
+A PettingZoo-compatible multi-agent reinforcement learning environment for training agents in a Risk-like territorial conquest game with simultaneous turn resolution.
 
 ## Overview
 
-**Parallel Risk** is a two-player territorial conquest game where both players submit their actions simultaneously each turn. Unlike traditional turn-based games, all actions are collected, shuffled randomly, and resolved sequentially.
+**Parallel Risk** is a two-player strategy game designed specifically for training multi-agent RL algorithms. Both players submit actions simultaneously each turn, which are shuffled and resolved sequentially, creating strategic uncertainty and emergent gameplay.
 
-The environment is designed for training multi-agent reinforcement learning algorithms and follows the [PettingZoo Parallel API](https://pettingzoo.farama.org/api/parallel/).
-
-## Game Rules
-
-### Objective
-
-Control all territories to win, or have the most territories when the turn limit is reached.
-
-### Map Structure
-
-The default map (`simple_6`) consists of 6 territories arranged in a grid:
-
-```
-0 - 1 - 2  (North Region)
-|   |   |
-3 - 4 - 5  (South Region)
-```
-
-**Regions:**
-- **North Region** [0, 1, 2]: +4 bonus troops/turn when fully controlled
-- **South Region** [3, 4, 5]: +4 bonus troops/turn when fully controlled
-- **Center Region** [1, 4]: +2 bonus troops/turn when fully controlled
-
-**Initial Setup:**
-- Agent 0 starts with territories [0, 1, 5]
-- Agent 1 starts with territories [2, 3, 4]
-- Each territory starts with 3 troops
-
-### Turn Structure
-
-Each turn follows this sequence:
-
-1. **Income Phase**: Each player receives income troops based on:
-   - Base income: 5 troops/turn
-   - Region bonuses: Additional troops for controlling complete regions
-
-2. **Action Submission**: Both players simultaneously submit 0-10 actions
-
-3. **Action Resolution**:
-   - All actions from both players are collected
-   - Actions are shuffled randomly
-   - Actions are processed sequentially
-   - Invalid actions are skipped
-
-4. **Victory Check**: Game ends if one player controls all territories or turn limit reached
-
-### Action Types
-
-Each action is a triple: `(source_territory, dest_territory, num_troops)`
-
-The action type is determined by the territories involved:
-
-#### 1. Deploy `(x, x, troops)`
-- **When**: source == destination
-- **Effect**: Place troops from income onto owned territory
-- **Validation**: Must own territory, troops ≤ available income
-
-#### 2. Transfer `(x, y, troops)`
-- **When**: source ≠ destination, both owned by player
-- **Effect**: Move troops between owned territories
-- **Validation**: Territories adjacent, troops < source troops (must leave ≥1)
-
-#### 3. Attack `(x, y, troops)`
-- **When**: source owned by player, destination owned by opponent
-- **Effect**: Attack enemy territory
-- **Validation**: Territories adjacent, troops < source troops (must leave ≥1)
-
-### Combat Resolution
-
-Combat is **deterministic** and percentage-based:
-
-Given `x` attacking troops and `y` defending troops:
-- **Defender casualties** = 60% of x (rounded down)
-- **Attacker casualties** = 70% of y (rounded down)
-
-**Outcome:**
-- If defenders_remaining ≤ 0: **Attacker captures territory**
-  - Surviving attackers occupy the territory
-- Otherwise: **Defender holds**
-  - Defenders reduced but retain control
-  - Attackers lose their troops
-
-**Example:** 10 attackers vs 6 defenders
-- Defender loses: 10 × 0.6 = 6 (eliminated)
-- Attacker loses: 6 × 0.7 = 4 (rounded down)
-- Result: Attacker wins with 6 surviving troops
-
-**Strategic Note:** Attackers need ~1.67× the defending force to reliably capture territory.
-
-### Victory Conditions
-
-The game ends when:
-1. **Conquest**: One player owns all territories (+1.0 reward for winner, -1.0 for loser)
-2. **Elimination**: One player has 0 territories (+1.0 for survivor, -1.0 for eliminated)
-3. **Turn Limit**: 100 turns reached (+0.5 for territory leader, -0.5 for other)
+**Key Features:**
+- PettingZoo Parallel API compatible
+- Ready for RLlib/PPO training with self-play
+- Optional reward shaping to accelerate learning
+- Deterministic combat mechanics (no dice)
+- Agent-relative observations for symmetric self-play
+- Customizable maps and game parameters
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd parallel-risk-gym
-
-# Install dependencies
+# Basic installation
 pip install -r requirements.txt
+
+# For RL training (includes Ray/RLlib, PyTorch, TensorBoard)
+./install_training_deps.sh
 ```
 
-## Usage
+## Training RL Agents
 
-### Basic Example
+The primary use case: train competitive multi-agent RL policies.
+
+### Quick Start
+
+```bash
+# Quick test (10 iterations, ~5 minutes)
+python -m parallel_risk.training.train_rllib \
+    --config parallel_risk/training/configs/ppo_baseline.yaml \
+    --num-iterations 10 \
+    --num-workers 2
+
+# Full training run
+python -m parallel_risk.training.train_rllib \
+    --config parallel_risk/training/configs/ppo_baseline.yaml
+```
+
+### Training Features
+
+**RLlib Integration:**
+- Multi-agent PPO with self-play
+- Configurable policy pool and opponent sampling
+- Automatic checkpointing and TensorBoard logging
+- GPU support
+
+**Reward Shaping (Optional):**
+
+Accelerate learning with dense reward signals:
+
+```python
+from parallel_risk import ParallelRiskEnv
+from parallel_risk.env.reward_shaping import create_dense_config
+
+# Enable all reward components
+env = ParallelRiskEnv(reward_shaping_config=create_dense_config())
+
+# Or use sparse rewards only (default)
+env = ParallelRiskEnv()
+```
+
+Four configurable components:
+- **Territory control** - Reward for map control percentage
+- **Region completion** - Bonuses for completing regions
+- **Troop advantage** - Reward for troop count superiority
+- **Strategic position** - Reward for controlling key territories
+
+**Configuration:**
+
+Edit `parallel_risk/training/configs/ppo_baseline.yaml` to customize:
+- Environment settings (map, action budget, reward shaping)
+- PPO hyperparameters (learning rate, clip, entropy)
+- Training settings (workers, batch size, GPUs)
+- Network architecture
+
+**Training Guides:**
+- [docs/RLLIB_INTEGRATION.md](docs/RLLIB_INTEGRATION.md) - Complete training setup and troubleshooting
+- [docs/REWARD_SHAPING.md](docs/REWARD_SHAPING.md) - Reward component details and tuning
+- [docs/RL_TRAINING_ROADMAP.md](docs/RL_TRAINING_ROADMAP.md) - Project roadmap and next steps
+
+## Basic Usage
+
+### Simple Example
 
 ```python
 from parallel_risk import ParallelRiskEnv
@@ -123,259 +94,196 @@ import numpy as np
 
 # Create environment
 env = ParallelRiskEnv()
-
-# Reset environment
 observations, infos = env.reset()
 
 # Game loop
 while env.agents:
-    # Generate actions for each agent
     actions = {}
     for agent in env.agents:
-        # Example: Deploy 3 troops to territory 0
+        # Deploy 3 troops to territory 0
         actions[agent] = {
             'num_actions': 1,
-            'actions': np.array([
-                [0, 0, 3],  # Deploy 3 troops to territory 0
-                [0, 0, 0],  # Padding (unused)
-                # ... more padding to reach max_actions_per_turn
-            ], dtype=np.int32)
+            'actions': np.array([[0, 0, 3]] + [[0, 0, 0]] * 9, dtype=np.int32)
         }
-
-    # Step environment
+    
     observations, rewards, terminations, truncations, infos = env.step(actions)
-
-    # Render current state
-    env.render()
-
+    
     if any(terminations.values()):
         print(f"Game over! Rewards: {rewards}")
         break
 ```
 
-### Random Policy Example
-
-See `test_run.py` for a complete example with random policies:
+### Run Tests
 
 ```bash
-python tests/test_run.py
-```
-
-## Observation Space
-
-Each agent receives a `Dict` observation with:
-
-```python
-{
-    'territory_ownership': Box(shape=(6,), dtype=int8),      # -1=enemy, 1=self
-    'territory_troops': Box(shape=(6,), dtype=int32),        # Troop counts
-    'adjacency_matrix': Box(shape=(6,6), dtype=int8),        # Map structure
-    'available_income': Box(shape=(1,), dtype=int32),        # Deployable troops
-    'turn_number': Box(shape=(1,), dtype=int32),             # Current turn
-    'region_control': Box(shape=(3,), dtype=int8),           # Controlled regions
-}
-```
-
-**Notes:**
-- Observations are **agent-relative** (ownership from agent's perspective)
-- All information is **fully observable** (no fog of war)
-- Adjacency matrix is static but included for network convenience
-
-## Action Space
-
-Each agent submits a `Dict` action:
-
-```python
-{
-    'num_actions': Discrete(11),                    # 0 to 10 actions
-    'actions': Box(shape=(10, 3), dtype=int32),     # Action triples
-}
-```
-
-Only the first `num_actions` rows of the `actions` array are processed.
-
-**Action Triple Format:** `[source_territory, dest_territory, num_troops]`
-
-## Environment Configuration
-
-```python
-from parallel_risk import ParallelRiskEnv
-from parallel_risk.env.reward_shaping import create_dense_config
-
-env = ParallelRiskEnv(
-    map_name="simple_6",              # Map configuration
-    max_actions_per_turn=10,          # Max actions per player per turn
-    income_per_turn=5,                # Base income
-    max_turns=100,                    # Turn limit
-    initial_troops_per_territory=3,   # Starting troops
-    seed=None,                        # Random seed
-    reward_shaping_config=None,       # Optional: create_dense_config() for shaped rewards
-)
-```
-
-**Reward Shaping Options:**
-- `None` - Sparse rewards only (default, +1/-1 for win/loss)
-- `create_sparse_config()` - Explicitly no shaping
-- `create_dense_config()` - All reward components enabled
-- `create_territorial_config()` - Territory + region rewards only
-- `create_aggressive_config()` - Troop + strategic rewards only
-- Custom `RewardShapingConfig(...)` - Fine-tune individual components
-
-See `docs/REWARD_SHAPING.md` for details.
-
-## Testing
-
-Run the test suites to verify functionality:
-
-```bash
-# Run all tests
+# All tests
 python run_tests.py
 
-# Or run individual tests with PYTHONPATH
+# Individual test suites
 PYTHONPATH=. python tests/test_mechanics.py
-PYTHONPATH=. python tests/test_combat.py
-PYTHONPATH=. python tests/test_regions.py
-PYTHONPATH=. python tests/test_run.py
-PYTHONPATH=. python tests/test_reward_shaping.py
 PYTHONPATH=. python tests/test_rllib_wrapper.py  # Requires Ray/RLlib
 ```
 
-## Strategic Considerations
+## Game Mechanics
 
-### Region Control
-- Completing regions provides significant income advantage
-- Breaking opponent's regions is often easier than capturing them
-- Economic advantage compounds over time
+### Objective
 
-### Combat Efficiency
-- Small attacks usually fail (10 vs 10 → defender holds)
-- Overwhelming force is efficient (20 vs 10 → keep 13 troops)
-- Defenders have advantage (~17% fewer casualties)
+Control all territories to win, or have the most territories when the turn limit (100 turns) is reached.
 
-### Action Order
-- Actions are resolved randomly
-- Can't predict exact order
-- Multiple attacks on same territory possible
-- Last successful attack determines ownership
+### Map
 
-### Income Management
-- Base income: 5 troops/turn
-- Region bonuses stack (can reach 11 troops/turn)
-- Must deploy during same turn (doesn't accumulate)
+Default map (`simple_6`) - 6 territories in a 2×3 grid:
+
+```
+0 - 1 - 2  (North Region)
+|   |   |
+3 - 4 - 5  (South Region)
+```
+
+**Regions provide income bonuses:**
+- North [0, 1, 2]: +4 troops/turn
+- South [3, 4, 5]: +4 troops/turn
+- Center [1, 4]: +2 troops/turn
+
+### Actions
+
+Each action is a triple: `[source, destination, num_troops]`
+
+**Three action types:**
+1. **Deploy** `[x, x, troops]` - Place income troops on owned territory
+2. **Transfer** `[x, y, troops]` - Move troops between owned adjacent territories
+3. **Attack** `[x, y, troops]` - Attack adjacent enemy territory
+
+**Constraints:**
+- Max 10 actions per turn per player
+- Must leave ≥1 troop on source territory
+- Income must be deployed in the same turn (doesn't accumulate)
+
+### Combat
+
+Deterministic percentage-based system:
+- Defender loses: 60% of attacking troops (rounded down)
+- Attacker loses: 70% of defending troops (rounded down)
+- Attacker captures if defenders reduced to ≤0
+
+**Example:** 10 attackers vs 6 defenders
+- Defender: 6 - (10 × 0.6) = 0 (eliminated)
+- Attacker: 10 - (6 × 0.7) = 6 survivors
+- Result: Attacker captures with 6 troops
+
+**Strategic note:** Need ~1.67× defender force to reliably capture.
+
+### Turn Flow
+
+1. **Income Phase** - Calculate income (base 5 + region bonuses)
+2. **Action Submission** - Both players submit 0-10 actions simultaneously
+3. **Resolution** - All actions shuffled and executed sequentially
+4. **Victory Check** - Check win conditions
+
+### Victory Conditions
+
+- **Conquest:** Control all territories (+1.0 / -1.0 reward)
+- **Elimination:** Opponent has 0 territories (+1.0 / -1.0)
+- **Turn Limit:** Most territories at turn 100 (+0.5 / -0.5)
+
+## API Reference
+
+### Observation Space
+
+Agent-relative `Dict` observations:
+
+```python
+{
+    'territory_ownership': Box(shape=(6,), dtype=int8),    # 1=self, -1=enemy
+    'territory_troops': Box(shape=(6,), dtype=int32),      # Troop counts
+    'adjacency_matrix': Box(shape=(6,6), dtype=int8),      # Map structure
+    'available_income': Box(shape=(1,), dtype=int32),      # Deployable troops
+    'turn_number': Box(shape=(1,), dtype=int32),           # Current turn
+    'region_control': Box(shape=(3,), dtype=int8),         # Binary region control
+}
+```
+
+### Action Space
+
+```python
+{
+    'num_actions': Discrete(11),                   # 0 to 10 actions
+    'actions': Box(shape=(10, 3), dtype=int32),    # [source, dest, troops]
+}
+```
+
+### Environment Configuration
+
+```python
+env = ParallelRiskEnv(
+    map_name="simple_6",                   # Map to use
+    max_actions_per_turn=10,               # Action budget
+    income_per_turn=5,                     # Base income
+    max_turns=100,                         # Turn limit
+    initial_troops_per_territory=3,        # Starting troops
+    seed=None,                             # Random seed
+    reward_shaping_config=None,            # Optional reward shaping
+)
+```
+
+**Reward shaping presets:**
+- `create_sparse_config()` - No shaping (default)
+- `create_dense_config()` - All components enabled
+- `create_territorial_config()` - Territory + region rewards
+- `create_aggressive_config()` - Troop + strategic rewards
+
+### Info Dict
+
+```python
+infos[agent] = {
+    'invalid_actions': int,                    # Count of invalid actions
+    'controlled_regions': list[str],           # Controlled region names
+    'income': int,                             # Next turn income
+    'reward_components': dict,                 # Breakdown (if shaping enabled)
+}
+```
 
 ## Advanced Features
 
 ### Custom Maps
 
-Add new maps by extending `_initialize_map()`:
+Add new maps in `parallel_risk/env/map_config.py`:
 
 ```python
-def _initialize_map(self):
-    if self.map_name == "custom_8":
-        adjacency_list = {...}
-        regions = {...}
-        region_bonuses = {...}
-        # ... return map_config
+def create_custom_8_map():
+    adjacency_list = {...}
+    regions = {...}
+    region_bonuses = {...}
+    # Build adjacency matrix, initial ownership
+    
+    return MapConfig(
+        n_territories=8,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+MapRegistry.register("custom_8", create_custom_8_map)
 ```
 
 ### Action Masking
 
-The `infos` dict includes useful debugging information:
-
-```python
-infos[agent] = {
-    'invalid_actions': int,           # Count of invalid actions
-    'controlled_regions': list[str],  # Region names controlled
-    'income': int,                    # Next turn's income
-}
-```
-
-For better RL training, implement action masking using the observation space (see `docs/DESIGN_NOTES.md` for examples).
+For improved training efficiency, implement action masking using the observation space. See [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) for implementation examples.
 
 ## Documentation
 
-- **CLAUDE.md** - Guide for Claude Code agents working on this project
-- **docs/DESIGN_NOTES.md** - Detailed design decisions, alternative approaches, and extension possibilities
-- **docs/COMBAT_SYSTEM.md** - Complete combat mechanics documentation with examples
-- **docs/REWARD_SHAPING.md** - Guide to reward shaping for RL training
-- **docs/RLLIB_INTEGRATION.md** - Complete guide to training with RLlib
-- **docs/RL_TRAINING_ROADMAP.md** - Two-phase plan for RL training (baseline → GNN)
-- **docs/REWARD_SHAPING_SUMMARY.md** - Implementation summary for reward shaping
-- **docs/RLLIB_INTEGRATION_SUMMARY.md** - Implementation summary for RLlib integration
-
-## Training RL Agents
-
-The environment is ready for training reinforcement learning agents with **RLlib/PPO** and optional **reward shaping**.
-
-### Quick Start
-
-```bash
-# Install training dependencies
-./install_training_deps.sh
-
-# Run quick test (2 iterations, ~20 seconds)
-python -m parallel_risk.training.train_rllib \
-    --config parallel_risk/training/configs/ppo_baseline.yaml \
-    --num-iterations 2 \
-    --num-workers 1
-
-# Full training (1000 iterations, ~12-24 hours)
-python -m parallel_risk.training.train_rllib \
-    --config parallel_risk/training/configs/ppo_baseline.yaml
-```
-
-### Features
-
-**Environment Wrapper:**
-- Converts PettingZoo ParallelEnv to RLlib MultiAgentEnv
-- Flattens Dict observations to vectors (53 dims for simple_6)
-- Fixed action budget (default: 5 actions per turn)
-- Supports reward shaping configuration
-
-**Reward Shaping (Optional):**
-Four configurable components to accelerate learning:
-- **Territory control** - Reward for % of map controlled
-- **Region completion** - One-time bonuses for completing regions
-- **Troop advantage** - Reward for troop count ratio
-- **Strategic position** - Reward for controlling well-connected territories
-
-```python
-from parallel_risk import ParallelRiskEnv
-from parallel_risk.env.reward_shaping import create_dense_config
-
-# With reward shaping
-env = ParallelRiskEnv(reward_shaping_config=create_dense_config())
-
-# Without reward shaping (sparse rewards only)
-env = ParallelRiskEnv()
-```
-
-**Training Configuration:**
-Edit `parallel_risk/training/configs/ppo_baseline.yaml` to customize:
-- Environment settings (map, action budget, reward shaping)
-- PPO hyperparameters (learning rate, clip param, entropy)
-- Training settings (workers, batch size, GPUs)
-- Network architecture (hidden layers, activation)
-
-**Documentation:**
-- **docs/RLLIB_INTEGRATION.md** - Complete training guide
-- **docs/REWARD_SHAPING.md** - Reward shaping details
-- **docs/RL_TRAINING_ROADMAP.md** - Training roadmap and next steps
-
-### Testing
-
-```bash
-# Test environment wrapper
-PYTHONPATH=. python tests/test_rllib_wrapper.py
-
-# Test reward shaping
-PYTHONPATH=. python tests/test_reward_shaping.py
-```
-
+- [CLAUDE.md](CLAUDE.md) - Project guide for Claude Code agents
+- [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) - Design decisions and extension ideas
+- [docs/COMBAT_SYSTEM.md](docs/COMBAT_SYSTEM.md) - Combat mechanics deep dive
+- [docs/REWARD_SHAPING.md](docs/REWARD_SHAPING.md) - Reward shaping guide
+- [docs/RLLIB_INTEGRATION.md](docs/RLLIB_INTEGRATION.md) - RLlib training guide
+- [docs/RL_TRAINING_ROADMAP.md](docs/RL_TRAINING_ROADMAP.md) - Training roadmap
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 

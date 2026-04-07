@@ -29,7 +29,7 @@ Implemented complete RLlib integration for training RL agents on Parallel Risk. 
 
 **Observation Flattening:**
 - **Input:** Dict with territory_ownership, territory_troops, adjacency_matrix, etc.
-- **Output:** Single vector of floats (50 dimensions for simple_6 map)
+- **Output:** Single vector of floats (53 dimensions for simple_6 map)
 - **Why:** Standard MLPs expect flat vectors, not nested dicts
 
 **Factory Function:**
@@ -236,7 +236,7 @@ Agent always submits 5 actions, invalid ones are skipped.
 ### Observation Space
 
 **Original:** Dict with 6 keys (ownership, troops, adjacency, income, turn, regions)
-**RLlib:** Box(50,) for simple_6 map
+**RLlib:** Box(53,) for simple_6 map
 
 ```python
 # Flattened vector:
@@ -246,9 +246,9 @@ Agent always submits 5 actions, invalid ones are skipped.
     adj_0_0, adj_0_1, ..., adj_5_5,                  # 36 values
     income,                                           # 1 value
     turn,                                             # 1 value
-    region_0, region_1                                # 2 values
+    region_0, region_1, region_2                      # 3 values (north, south, center)
 ]
-# Total: 52 values
+# Total: 53 values
 ```
 
 ### Training Loop
