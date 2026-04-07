@@ -28,6 +28,27 @@ pip install -r requirements.txt
 
 The primary use case: train competitive multi-agent RL policies.
 
+### Validate Learning
+
+First, verify agents can learn by running the validation experiment:
+
+```bash
+# Quick test (10 iterations, ~10 minutes)
+python experiments/validate_learning.py \
+    --num-iterations 10 \
+    --eval-interval 5 \
+    --verbose
+
+# Full validation (500 iterations, ~2-3 hours)
+python experiments/validate_learning.py \
+    --num-iterations 500 \
+    --eval-interval 50
+```
+
+**Success criteria:** Trained agent achieves >70% win rate vs. random opponent.
+
+See [docs/VALIDATION_EXPERIMENT.md](docs/VALIDATION_EXPERIMENT.md) for complete guide.
+
 ### Quick Start
 
 ```bash
@@ -80,6 +101,7 @@ Edit `parallel_risk/training/configs/ppo_baseline.yaml` to customize:
 - Network architecture
 
 **Training Guides:**
+- [docs/VALIDATION_EXPERIMENT.md](docs/VALIDATION_EXPERIMENT.md) - Validate that agents can learn
 - [docs/RLLIB_INTEGRATION.md](docs/RLLIB_INTEGRATION.md) - Complete training setup and troubleshooting
 - [docs/REWARD_SHAPING.md](docs/REWARD_SHAPING.md) - Reward component details and tuning
 - [docs/RL_TRAINING_ROADMAP.md](docs/RL_TRAINING_ROADMAP.md) - Project roadmap and next steps
@@ -275,6 +297,7 @@ For improved training efficiency, implement action masking using the observation
 ## Documentation
 
 - [CLAUDE.md](CLAUDE.md) - Project guide for Claude Code agents
+- [docs/VALIDATION_EXPERIMENT.md](docs/VALIDATION_EXPERIMENT.md) - Learning validation experiment
 - [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) - Design decisions and extension ideas
 - [docs/COMBAT_SYSTEM.md](docs/COMBAT_SYSTEM.md) - Combat mechanics deep dive
 - [docs/REWARD_SHAPING.md](docs/REWARD_SHAPING.md) - Reward shaping guide
