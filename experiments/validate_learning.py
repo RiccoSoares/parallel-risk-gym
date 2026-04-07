@@ -29,19 +29,93 @@ def run_baseline_evaluation(results_dir, num_episodes=100, verbose=True):
     print("="*70)
 
     if verbose:
-        print("This establishes that two random agents have ~50% win rate.")
+        print(f"Running {num_episodes} episodes with two random agents...")
+        print("This establishes empirical baseline performance.\n")
 
-    # Create a dummy checkpoint by training for 1 iteration
-    # (We need a checkpoint to evaluate, even for random)
-    # Actually, we'll skip this and just report 50% as expected baseline
+    # Import here to avoid issues if Ray isn't initialized
+    from parallel_risk.agents.random_agent import RandomAgent
+    from parallel_risk.training.rllib_wrapper import make_rllib_env
 
-    print("\nBaseline (expected): Random vs. Random = 50% win rate")
-    print("This is our reference point for learning validation.\n")
+    # Create environment
+    env_config = {
+        "map_name": "simple_6",
+        "max_turns": 100,
+        "action_budget": 5,
+        "reward_shaping_type": "sparse",
+    }
+    env = make_rllib_env(env_config)
+    n_territories = env.env.map_config.n_territories
+
+    # Create two random agents
+    random_agent_0 = RandomAgent(n_territories=n_territories, action_budget=5, mode="rllib")
+    random_agent_1 = RandomAgent(n_territories=n_territories, action_budget=5, mode="rllib")
+
+    # Run episodes
+    wins = 0
+    losses = 0
+    draws = 0
+    episode_lengths = []
+
+    for episode in range(num_episodes):
+        obs, info = env.reset(seed=42 + episode)
+        done = {"__all__": False}
+        episode_length = 0
+
+        while not done["__all__"]:
+            actions = {}
+            if "agent_0" in obs:
+                actions["agent_0"] = random_agent_0.get_action()
+            if "agent_1" in obs:
+                actions["agent_1"] = random_agent_1.get_action()
+
+            obs, rewards, terminateds, truncateds, infos = env.step(actions)
+
+            done = {k: terminateds.get(k, False) or truncateds.get(k, False)
+                   for k in ["agent_0", "agent_1", "__all__"]}
+            if not done.get("__all__"):
+                done["__all__"] = all([done.get("agent_0", False), done.get("agent_1", False)])
+
+            episode_length += 1
+
+        # Count results
+        reward_0 = rewards.get("agent_0", 0)
+        reward_1 = rewards.get("agent_1", 0)
+
+        if reward_0 > reward_1:
+            wins += 1
+        elif reward_0 < reward_1:
+            losses += 1
+        else:
+            draws += 1
+
+        episode_lengths.append(episode_length)
+
+        if verbose and (episode + 1) % 20 == 0:
+            current_win_rate = wins / (episode + 1)
+            print(f"  Episode {episode + 1}/{num_episodes} - Win rate: {current_win_rate:.2%}")
+
+    total = wins + losses + draws
+    win_rate = wins / total
 
     baseline_results = {
-        "win_rate": 0.5,
-        "note": "Theoretical baseline - random vs. random",
+        "win_rate": win_rate,
+        "loss_rate": losses / total,
+        "draw_rate": draws / total,
+        "wins": wins,
+        "losses": losses,
+        "draws": draws,
+        "total_episodes": total,
+        "avg_episode_length": np.mean(episode_lengths),
+        "std_episode_length": np.std(episode_lengths),
+        "note": "Empirical baseline - two random agents",
     }
+
+    print(f"\n{'='*70}")
+    print(f"Baseline Results:")
+    print(f"  Win rate: {win_rate:.2%} (expected ~50%)")
+    print(f"  Draws: {draws} ({baseline_results['draw_rate']:.2%})")
+    print(f"  Avg episode length: {baseline_results['avg_episode_length']:.1f}")
+    print(f"{'='*70}\n")
 
     # Save baseline results
     baseline_path = results_dir / "baseline_results.json"
