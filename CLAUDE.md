@@ -84,15 +84,19 @@ Four reward components can be enabled independently:
 - **parallel_risk/** - Main package
   - **env/** - Environment components (core, maps, combat, validation, reward shaping)
   - **training/** - RLlib training infrastructure (wrapper, training script, configs)
+  - **agents/** - Agent implementations (random, checkpoint-based)
+  - **evaluation/** - Evaluation infrastructure (evaluate_agent, league_evaluator, visualize, league_visualize)
 - **tests/** - Test suite (mechanics, combat, regions, run, reward_shaping, rllib_wrapper)
 - **examples/** - Usage examples (reward_shaping_demo.py)
+- **experiments/** - Research experiment scripts (validate_learning, self_play_league)
 - **docs/** - Design documentation
   - DESIGN_NOTES.md - Deep dive into design decisions
   - COMBAT_SYSTEM.md - Complete combat mechanics
   - REWARD_SHAPING.md - RL reward shaping guide
   - RLLIB_INTEGRATION.md - RLlib training guide
   - RL_TRAINING_ROADMAP.md - Two-phase RL training plan
-- **requirements.txt** - Dependencies (includes RLlib/Ray for training)
+  - SELF_PLAY_LEAGUE.md - Self-play league experiment guide
+- **requirements.txt** - Dependencies (includes RLlib/Ray for training, matplotlib/seaborn for plotting)
 - **install_training_deps.sh** - Install training dependencies
 - **run_tests.py** - Convenience script to run all tests
 
@@ -143,6 +147,51 @@ Edit `parallel_risk/training/configs/ppo_baseline.yaml` to customize:
 - Network architecture
 
 See `docs/RLLIB_INTEGRATION.md` for complete guide.
+
+## Research Experiments
+
+### Self-Play League Experiment
+
+Comprehensive experiment that trains with self-play and evaluates learning against both random baseline AND historical policy snapshots:
+
+```bash
+# Test run (10 iterations, ~10 minutes)
+PYTHONPATH=. python experiments/self_play_league.py \
+    --num-iterations 10 \
+    --snapshot-interval 5 \
+    --eval-interval 5 \
+    --num-eval-episodes 20 \
+    --num-workers 2 \
+    --verbose
+
+# Full experiment (500 iterations, ~2-3 hours)
+PYTHONPATH=. python experiments/self_play_league.py \
+    --config parallel_risk/training/configs/ppo_sparse.yaml \
+    --num-iterations 500 \
+    --snapshot-interval 50 \
+    --eval-interval 50 \
+    --num-eval-episodes 100 \
+    --num-workers 4 \
+    --verbose
+```
+
+**Output:**
+- Training checkpoints in `checkpoints/league_training/`
+- Policy snapshots in `league_snapshots/`
+- Results JSON in `experiments/league_results/league_results.json`
+- Plots: win rates, heatmap, aggregate learning curve, dashboard
+
+See `docs/SELF_PLAY_LEAGUE.md` for complete guide.
+
+### Validation Experiment (Random-Only)
+
+Simple validation that trains and evaluates against random opponent only:
+
+```bash
+PYTHONPATH=. python experiments/validate_learning.py --num-iterations 500
+```
+
+See validation script for details.
 
 ## Adding New Features
 
