@@ -1,0 +1,138 @@
+======================================================================
+PARALLEL RISK SELF-PLAY LEAGUE EXPERIMENT
+======================================================================
+
+Date: 2026-04-07 23:28:07
+
+Experiment Configuration:
+  map_name: simple_6
+  max_turns: 100
+  action_budget: 5
+  reward_shaping: sparse
+  num_iterations: 500
+  snapshot_interval: 50
+  eval_interval: 50
+  num_eval_episodes: 100
+  num_workers: 6
+  timestamp: 2026-04-07T21:42:58.055799
+
+======================================================================
+EVALUATION RESULTS
+======================================================================
+
+
+Iteration 50:
+--------------------------------------------------
+  vs random_baseline               : 89.00% win rate (89W-11L-0D)
+  vs snapshot_iter_50              : 99.00% win rate (99W-1L-0D)
+  Average                         : 94.00%
+
+Iteration 100:
+--------------------------------------------------
+  vs random_baseline               : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_50              : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_100             : 71.00% win rate (71W-29L-0D)
+  Average                         : 90.33%
+
+Iteration 150:
+--------------------------------------------------
+  vs random_baseline               : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_50              : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_100             : 86.00% win rate (86W-14L-0D)
+  vs snapshot_iter_150             : 42.00% win rate (42W-58L-0D)
+  Average                         : 82.00%
+
+Iteration 200:
+--------------------------------------------------
+  vs random_baseline               : 99.00% win rate (99W-1L-0D)
+  vs snapshot_iter_50              : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_100             : 93.00% win rate (93W-7L-0D)
+  vs snapshot_iter_150             : 53.00% win rate (53W-47L-0D)
+  vs snapshot_iter_200             : 82.00% win rate (82W-18L-0D)
+  Average                         : 85.40%
+
+Iteration 250:
+--------------------------------------------------
+  vs random_baseline               : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_50              : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_100             : 95.00% win rate (95W-5L-0D)
+  vs snapshot_iter_150             : 87.00% win rate (87W-13L-0D)
+  vs snapshot_iter_200             : 70.00% win rate (70W-30L-0D)
+  vs snapshot_iter_250             : 65.00% win rate (65W-35L-0D)
+  Average                         : 86.17%
+
+Iteration 300:
+--------------------------------------------------
+  vs random_baseline               : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_50              : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_100             : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_150             : 95.00% win rate (95W-5L-0D)
+  vs snapshot_iter_200             : 79.00% win rate (79W-21L-0D)
+  vs snapshot_iter_250             : 74.00% win rate (74W-26L-0D)
+  vs snapshot_iter_300             : 64.00% win rate (64W-36L-0D)
+  Average                         : 87.43%
+
+Iteration 350:
+--------------------------------------------------
+  vs random_baseline               : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_50              : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_100             : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_150             : 97.00% win rate (97W-3L-0D)
+  vs snapshot_iter_200             : 90.00% win rate (90W-10L-0D)
+  vs snapshot_iter_250             : 77.00% win rate (77W-23L-0D)
+  vs snapshot_iter_300             : 84.00% win rate (84W-16L-0D)
+  vs snapshot_iter_350             : 61.00% win rate (61W-39L-0D)
+  Average                         : 88.62%
+
+Iteration 400:
+--------------------------------------------------
+  vs random_baseline               : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_50              : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_100             : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_150             : 97.00% win rate (97W-3L-0D)
+  vs snapshot_iter_200             : 90.00% win rate (90W-10L-0D)
+  vs snapshot_iter_250             : 92.00% win rate (92W-8L-0D)
+  vs snapshot_iter_300             : 84.00% win rate (84W-16L-0D)
+  vs snapshot_iter_350             : 75.00% win rate (75W-25L-0D)
+  vs snapshot_iter_400             : 53.00% win rate (53W-47L-0D)
+  Average                         : 87.89%
+
+Iteration 450:
+--------------------------------------------------
+  vs random_baseline               : 99.00% win rate (99W-1L-0D)
+  vs snapshot_iter_50              : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_100             : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_150             : 94.00% win rate (94W-6L-0D)
+  vs snapshot_iter_200             : 91.00% win rate (91W-9L-0D)
+  vs snapshot_iter_250             : 99.00% win rate (99W-1L-0D)
+  vs snapshot_iter_300             : 92.00% win rate (92W-8L-0D)
+  vs snapshot_iter_350             : 87.00% win rate (87W-13L-0D)
+  vs snapshot_iter_400             : 61.00% win rate (61W-39L-0D)
+  vs snapshot_iter_450             : 51.00% win rate (51W-49L-0D)
+  Average                         : 87.40%
+
+Iteration 500:
+--------------------------------------------------
+  vs random_baseline               : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_50              : 100.00% win rate (100W-0L-0D)
+  vs snapshot_iter_100             : 98.00% win rate (98W-2L-0D)
+  vs snapshot_iter_150             : 92.00% win rate (92W-8L-0D)
+  vs snapshot_iter_200             : 96.00% win rate (96W-4L-0D)
+  vs snapshot_iter_250             : 90.00% win rate (90W-10L-0D)
+  vs snapshot_iter_300             : 86.00% win rate (86W-14L-0D)
+  vs snapshot_iter_350             : 84.00% win rate (84W-16L-0D)
+  vs snapshot_iter_400             : 73.00% win rate (73W-27L-0D)
+  vs snapshot_iter_450             : 40.00% win rate (40W-60L-0D)
+  vs snapshot_iter_500             : 32.00% win rate (32W-68L-0D)
+  Average                         : 81.00%
+
+======================================================================
+LEARNING VALIDATION
+======================================================================
+
+Final win rate vs random: 100.00%
+Avg win rate vs historical snapshots: 79.10%
+
+✓ SUCCESS: Agent demonstrates improvement over past versions
+
+======================================================================
