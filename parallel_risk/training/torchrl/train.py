@@ -139,7 +139,8 @@ class PPOTrainer:
         episode_reward = {agent: 0.0 for agent in obs.keys()}
         episode_length = 0
 
-        for step in range(num_steps):
+        steps_collected = 0
+        while steps_collected < num_steps:
             # Check if we need to reset (episode ended)
             if len(obs) == 0:
                 obs, _ = self.wrapped_env.reset()
@@ -149,6 +150,7 @@ class PPOTrainer:
             # Convert observations to batch
             graphs = [obs[agent] for agent in sorted(obs.keys())]
             batched_graph = Batch.from_data_list(graphs)
+            batch_size = len(graphs)
 
             # Forward pass through policy
             with torch.no_grad():
@@ -172,15 +174,6 @@ class PPOTrainer:
             # Step environment
             next_obs, rewards, terminateds, truncateds, infos = self.wrapped_env.step(actions_dict)
 
-            # Store experience
-            rollout['observations'].append(batched_graph)
-            rollout['actions'].append(actions_tensor)
-            rollout['rewards'].append(torch.tensor([rewards[agent] for agent in sorted(rewards.keys())], device=self.device))
-            rollout['values'].append(values.squeeze(-1))  # [batch_size]
-            rollout['log_probs'].append(log_probs)  # [batch_size, action_budget]
-            rollout['dones'].append(torch.tensor([terminateds[agent] for agent in sorted(terminateds.keys())], device=self.device))
-            rollout['batches'].append(batched_graph.batch)
-
             # Track episode stats
             for agent in rewards.keys():
                 episode_reward[agent] += rewards[agent]
@@ -189,13 +182,27 @@ class PPOTrainer:
             # Check if episode ended
             done = terminateds.get('__all__', False) or truncateds.get('__all__', False)
 
+            # Store experience (before checking done, so we have consistent batch sizes)
+            # Only include actual agent keys, not '__all__'
+            agent_keys = [k for k in sorted(rewards.keys()) if k != '__all__']
+
+            rollout['observations'].append(batched_graph)
+            rollout['actions'].append(actions_tensor)
+            rollout['rewards'].append(torch.tensor([rewards[agent] for agent in agent_keys], device=self.device))
+            rollout['values'].append(values.squeeze(-1))  # [batch_size]
+            rollout['log_probs'].append(log_probs)  # [batch_size, action_budget]
+            rollout['dones'].append(torch.tensor([terminateds[agent] for agent in agent_keys], dtype=torch.bool, device=self.device))
+            rollout['batches'].append(batched_graph.batch)
+
+            steps_collected += 1
+
             if done:
                 # Log episode stats
                 avg_reward = np.mean(list(episode_reward.values()))
                 self.episode_rewards.append(avg_reward)
                 self.episode_lengths.append(episode_length)
 
-                # Reset
+                # Reset for next episode
                 obs, _ = self.wrapped_env.reset()
                 episode_reward = {agent: 0.0 for agent in obs.keys()}
                 episode_length = 0
@@ -217,11 +224,20 @@ class PPOTrainer:
             advantages: Tensor of advantages
             returns: Tensor of returns
         """
+        # Verify all tensors have the same batch size
+        batch_sizes = [r.size(0) for r in rewards]
+        if len(set(batch_sizes)) > 1:
+            print(f"ERROR: Inconsistent batch sizes in rollout: {batch_sizes}")
+            print(f"  Rewards shapes: {[r.shape for r in rewards[:5]]}")
+            print(f"  Values shapes: {[v.shape for v in values[:5]]}")
+            raise ValueError(f"Inconsistent batch sizes: {batch_sizes}")
+
+        batch_size = rewards[0].size(0)
         advantages = []
         returns = []
 
-        gae = 0
-        next_value = 0
+        gae = torch.zeros(batch_size, device=self.device)
+        next_value = torch.zeros(batch_size, device=self.device)
 
         # Reverse iteration
         for t in reversed(range(len(rewards))):
@@ -229,7 +245,7 @@ class PPOTrainer:
             delta = rewards[t] + self.gamma * next_value * mask - values[t]
             gae = delta + self.gamma * self.gae_lambda * mask * gae
 
-            advantages.insert(0, gae)
+            advantages.insert(0, gae.clone())
             returns.insert(0, gae + values[t])
 
             next_value = values[t]
