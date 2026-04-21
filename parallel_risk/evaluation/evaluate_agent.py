@@ -14,7 +14,7 @@ import numpy as np
 from ray.rllib.algorithms.ppo import PPO
 
 from parallel_risk.agents.random_agent import RandomAgent
-from parallel_risk.training.rllib_wrapper import make_rllib_env
+from parallel_risk.training.rllib.wrapper import make_rllib_env
 
 
 def evaluate_policy(

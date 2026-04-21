@@ -1,0 +1,10 @@
+# TorchRL + GNN training dependencies (Phase 2)
+-r base.txt
+
+torch>=2.0.0
+torchrl>=0.3.0
+torch-geometric>=2.4.0
+tensorboard>=2.14.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+pyyaml>=6.0
