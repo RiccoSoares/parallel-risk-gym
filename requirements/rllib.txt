@@ -1,0 +1,9 @@
+# RLlib training dependencies (Phase 1)
+-r base.txt
+
+ray[rllib]==2.40.0
+torch>=2.0.0
+tensorboard>=2.14.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+pyyaml>=6.0

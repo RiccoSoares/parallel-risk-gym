@@ -83,7 +83,10 @@ Four reward components can be enabled independently:
 
 - **parallel_risk/** - Main package
   - **env/** - Environment components (core, maps, combat, validation, reward shaping)
-  - **training/** - RLlib training infrastructure (wrapper, training script, configs)
+  - **training/** - Training infrastructure
+    - **rllib/** - Phase 1: RLlib with MLPs (wrapper, training script, configs)
+    - **torchrl/** - Phase 2: TorchRL with GNNs (graph wrapper, training script)
+  - **models/** - Phase 2: GNN architectures (GCN, GAT, action decoder)
   - **agents/** - Agent implementations (random, checkpoint-based)
   - **evaluation/** - Evaluation infrastructure (evaluate_agent, league_evaluator, visualize, league_visualize)
 - **tests/** - Test suite (mechanics, combat, regions, run, reward_shaping, rllib_wrapper)
@@ -118,29 +121,50 @@ PYTHONPATH=. python tests/test_rllib_wrapper.py
 
 ### Installation
 
-Install training dependencies (Ray/RLlib, PyTorch, TensorBoard):
+Install training dependencies:
 ```bash
 ./install_training_deps.sh
-# or: pip install -r requirements.txt
+# Choose option 1 for RLlib (Phase 1), option 2 for TorchRL+GNN (Phase 2)
 ```
 
-### Quick Start
+Or manually:
+```bash
+# Phase 1 (RLlib)
+pip install -r requirements/rllib.txt
+
+# Phase 2 (TorchRL + GNN)
+pip install -r requirements/torchrl.txt
+```
+
+### Phase 1: RLlib Training (MLP)
 
 ```bash
 # Test training (10 iterations, ~5 minutes)
-python -m parallel_risk.training.train_rllib \
-    --config parallel_risk/training/configs/ppo_baseline.yaml \
+python -m parallel_risk.training.rllib.train \
+    --config parallel_risk/training/rllib/configs/ppo_baseline.yaml \
     --num-iterations 10 \
     --num-workers 2
 
 # Full training run
-python -m parallel_risk.training.train_rllib \
-    --config parallel_risk/training/configs/ppo_baseline.yaml
+python -m parallel_risk.training.rllib.train \
+    --config parallel_risk/training/rllib/configs/ppo_baseline.yaml
 ```
+
+### Phase 2: TorchRL + GNN Training
+
+**Status:** Skeleton created, implementation pending
+
+Once implemented:
+```bash
+python -m parallel_risk.training.torchrl.train \
+    --config parallel_risk/training/torchrl/configs/gnn_gcn.yaml
+```
+
+See `docs/TORCHRL_GNN_GUIDE.md` for Phase 2 details.
 
 ### Configuration
 
-Edit `parallel_risk/training/configs/ppo_baseline.yaml` to customize:
+Edit `parallel_risk/training/rllib/configs/ppo_baseline.yaml` to customize:
 - Environment (map, action budget, reward shaping)
 - PPO hyperparameters (learning rate, clip param, etc.)
 - Training settings (workers, batch size, GPUs)
@@ -274,8 +298,10 @@ print(infos['agent_0']['reward_components'])
 - **docs/DESIGN_NOTES.md** - Deep dive into design decisions, alternative approaches considered, 10+ extension possibilities with code examples
 - **docs/COMBAT_SYSTEM.md** - Complete combat mechanics with mathematical analysis
 - **docs/REWARD_SHAPING.md** - RL reward shaping guide with component details, tuning guidelines, and validation checklist
-- **docs/RLLIB_INTEGRATION.md** - Complete guide to training with RLlib: installation, configuration, troubleshooting
-- **docs/RL_TRAINING_ROADMAP.md** - Two-phase plan for RL training: Phase 1 (RLlib baseline) complete, Phase 2 (GNN) planned
+- **docs/RLLIB_INTEGRATION.md** - Phase 1: Complete guide to training with RLlib (installation, configuration, troubleshooting)
+- **docs/TORCHRL_GNN_GUIDE.md** - Phase 2: TorchRL + GNN training guide (skeleton, implementation pending)
+- **docs/RL_TRAINING_ROADMAP.md** - Two-phase plan for RL training: Phase 1 (RLlib baseline) complete, Phase 2 (GNN) in progress
+- **docs/SELF_PLAY_LEAGUE.md** - Self-play league experiment guide
 - **docs/REWARD_SHAPING_SUMMARY.md** - Implementation summary for reward shaping (Phase 1.1)
 - **docs/RLLIB_INTEGRATION_SUMMARY.md** - Implementation summary for RLlib integration (Phase 1.2)
 

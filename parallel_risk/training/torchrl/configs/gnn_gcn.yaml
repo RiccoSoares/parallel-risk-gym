@@ -1,0 +1,19 @@
+# GCN (Graph Convolutional Network) Configuration
+# TODO Phase 2: Implement GNN training
+
+env:
+  map_name: "simple_6"
+  max_turns: 100
+  reward_shaping: "sparse"
+
+model:
+  type: "gcn"
+  num_layers: 3
+  hidden_dim: 128
+
+training:
+  num_workers: 4
+  batch_size: 2048
+  learning_rate: 3.0e-4
+
+# TODO: Add TorchRL-specific config parameters

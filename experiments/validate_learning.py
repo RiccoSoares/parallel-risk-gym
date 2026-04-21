@@ -34,7 +34,7 @@ def run_baseline_evaluation(results_dir, num_episodes=100, verbose=True):
 
     # Import here to avoid issues if Ray isn't initialized
     from parallel_risk.agents.random_agent import RandomAgent
-    from parallel_risk.training.rllib_wrapper import make_rllib_env
+    from parallel_risk.training.rllib.wrapper import make_rllib_env
 
     # Create environment
     env_config = {
@@ -387,7 +387,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="parallel_risk/training/configs/ppo_baseline.yaml",
+        default="parallel_risk/training/rllib/configs/ppo_baseline.yaml",
         help="Training config file"
     )
     parser.add_argument(

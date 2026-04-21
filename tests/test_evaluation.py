@@ -8,7 +8,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from parallel_risk.agents.random_agent import RandomAgent
-from parallel_risk.training.rllib_wrapper import make_rllib_env
+from parallel_risk.training.rllib.wrapper import make_rllib_env
 
 
 def test_random_agent_creation():

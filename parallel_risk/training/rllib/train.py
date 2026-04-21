@@ -9,8 +9,8 @@ This script handles:
 - Logging metrics
 
 Usage:
-    python -m parallel_risk.training.train_rllib --config configs/ppo_baseline.yaml
-    python -m parallel_risk.training.train_rllib --config configs/ppo_baseline.yaml --num-workers 8
+    python -m parallel_risk.training.rllib.train --config parallel_risk/training/rllib/configs/ppo_baseline.yaml
+    python -m parallel_risk.training.rllib.train --config parallel_risk/training/rllib/configs/ppo_baseline.yaml --num-workers 8
 """
 
 import argparse
@@ -25,7 +25,7 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.policy.policy import PolicySpec
 from ray.tune.logger import pretty_print
 
-from parallel_risk.training.rllib_wrapper import make_rllib_env, RLlibParallelRiskEnv
+from parallel_risk.training.rllib.wrapper import make_rllib_env, RLlibParallelRiskEnv
 from parallel_risk.env.reward_shaping import (
     create_dense_config,
     create_sparse_config,

@@ -21,7 +21,7 @@ from pathlib import Path
 import ray
 import yaml
 
-from parallel_risk.training.train_rllib import (
+from parallel_risk.training.rllib.train import (
     load_config,
     create_env_config,
     setup_algorithm
@@ -415,7 +415,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="parallel_risk/training/configs/ppo_sparse.yaml",
+        default="parallel_risk/training/rllib/configs/ppo_sparse.yaml",
         help="Training config file"
     )
     parser.add_argument(

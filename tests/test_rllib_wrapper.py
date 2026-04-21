@@ -11,7 +11,7 @@ Verifies that:
 import sys
 import numpy as np
 
-from parallel_risk.training.rllib_wrapper import RLlibParallelRiskEnv, make_rllib_env
+from parallel_risk.training.rllib.wrapper import RLlibParallelRiskEnv, make_rllib_env
 from parallel_risk.env.reward_shaping import create_dense_config
 
 

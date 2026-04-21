@@ -1,10 +1,6 @@
-pettingzoo==1.25.0
-gymnasium==1.0.0
-numpy==2.3.5
+# Parallel Risk - Core Dependencies
+# Install base environment: pip install -r requirements.txt
+# For Phase 1 (RLlib): pip install -r requirements/rllib.txt
+# For Phase 2 (TorchRL+GNN): pip install -r requirements/torchrl.txt
 
-# RL Training dependencies
-ray[rllib]==2.40.0
-torch>=2.0.0
-tensorboard>=2.14.0
-matplotlib>=3.7.0
-seaborn>=0.12.0
+-r requirements/base.txt

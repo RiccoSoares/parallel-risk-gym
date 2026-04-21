@@ -13,7 +13,7 @@ from ray.rllib.algorithms.ppo import PPO
 
 from parallel_risk.agents.random_agent import RandomAgent
 from parallel_risk.agents.checkpoint_agent import CheckpointAgent
-from parallel_risk.training.rllib_wrapper import make_rllib_env
+from parallel_risk.training.rllib.wrapper import make_rllib_env
 
 
 def discover_snapshots(snapshot_dir: str) -> List[Dict]:
