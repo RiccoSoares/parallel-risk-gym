@@ -315,6 +315,11 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
         # If game ended, ensure both agents get terminations
         if any(terminations.values()):
             self.agents = []
+            terminations['__all__'] = True
+        else:
+            terminations['__all__'] = False
+
+        truncations['__all__'] = False
 
         return observations, rewards, terminations, truncations, infos
 
