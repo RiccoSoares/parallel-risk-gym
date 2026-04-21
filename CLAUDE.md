@@ -152,12 +152,18 @@ python -m parallel_risk.training.rllib.train \
 
 ### Phase 2: TorchRL + GNN Training
 
-**Status:** Skeleton created, implementation pending
+**Status:** Phase 2.1-2.3 Complete - Training pipeline fully functional
 
-Once implemented:
 ```bash
+# Short test run (20 iterations, ~2 minutes)
 python -m parallel_risk.training.torchrl.train \
-    --config parallel_risk/training/torchrl/configs/gnn_gcn.yaml
+    --config parallel_risk/training/torchrl/configs/gnn_gcn.yaml \
+    --num-iterations 20
+
+# Full training run (1000 iterations, ~1-2 hours)
+python -m parallel_risk.training.torchrl.train \
+    --config parallel_risk/training/torchrl/configs/gnn_gcn.yaml \
+    --num-iterations 1000
 ```
 
 See `docs/TORCHRL_GNN_GUIDE.md` for Phase 2 details.

@@ -1,7 +1,7 @@
 # RL Training Roadmap
 
-**Last Updated:** 2026-04-07  
-**Status:** Phase 1 Complete (Steps 1-2), Phase 2 Planned
+**Last Updated:** 2026-04-21  
+**Status:** Phase 1 Complete, Phase 2 Complete (Steps 1-3)
 
 ## Overview
 
@@ -516,30 +516,50 @@ experiments/                      # NEW: Experiment logs and results
   - Unit tests in `tests/test_rllib_wrapper.py`
   - Documentation in `docs/RLLIB_INTEGRATION.md`
 
+- [x] **Phase 2.1: Graph Observation Wrapper** - Fully implemented
+  - Created `parallel_risk/training/torchrl/graph_wrapper.py` 
+  - Converts environment observations to PyTorch Geometric format
+  - Handles variable-sized graphs and batching
+  - Test suite in `tests/test_graph_wrapper.py` (5/5 passing)
+
+- [x] **Phase 2.2: GNN Policy Architectures** - Fully implemented
+  - Created `parallel_risk/models/gnn_gcn.py` with actor-critic heads
+  - Created `parallel_risk/models/action_decoder.py` for discrete actions
+  - Handles batched variable-sized graphs
+  - Test suite in `tests/test_gnn_policy.py` (4/4 passing)
+
+- [x] **Phase 2.3: TorchRL Training Loop** - Fully implemented
+  - Created `parallel_risk/training/torchrl/train.py` with PPO + self-play
+  - Rollout collection with episode boundary handling
+  - GAE computation, TensorBoard logging, checkpointing
+  - Test suite in `tests/test_training.py` (5/5 passing)
+  - Successfully runs end-to-end training (validated with 20-iteration run)
+
 ### In Progress:
-- **Phase 1.3-1.4: Evaluation & Experiments** - Ready to begin full training runs
-  - Infrastructure complete, can start baseline training
-  - Need to implement tournament system for agent evaluation
-  - Need to run ablation studies on reward shaping
+- **Phase 1.3-1.4 & Phase 2.4: Evaluation & Experiments** - Ready to begin
+  - Phase 2.3 training pipeline complete and bug-free
+  - Next: Validate learning by training GNN for extended iterations
+  - Compare GNN performance to Phase 1 MLP baseline
+  - Future: Multi-map training and transfer learning experiments
 
 ## Next Steps
 
-**Immediate:** Phase 1.3 - Evaluation Harness
-1. Create `parallel_risk/evaluation/` directory
-2. Implement tournament system for head-to-head matches
-3. Add Elo rating tracking
-4. Create visualization tools for training curves
+**Immediate:** Phase 2.4 - Validate GNN Learning
+1. Run extended training (500-1000 iterations) with GNN policy
+2. Evaluate trained GNN agent vs random baseline
+3. Plot learning curves (win rate over training)
+4. Verify agent shows strategic behavior
 
-**Short-term:** Phase 1.4 - Baseline Experiments
-1. Run full training with different reward shaping configs
-2. Compare sparse vs. dense rewards
-3. Measure win rates against random/heuristic baselines
-4. Document best configuration and hyperparameters
+**Short-term:** Compare Phase 1 vs Phase 2
+1. Compare GNN performance to Phase 1 MLP baseline
+2. Measure convergence speed and final win rate
+3. Analyze strategic behavior differences
 
-**Long-term:** Phase 2 - Graph Neural Networks
-1. Start with graph observation wrapper (PyG format)
-2. Implement GNN policy architectures (GCN, GAT, GraphSAGE)
-3. Multi-map training experiments
+**Long-term:** Multi-Map Training & Transfer Learning
+1. Train GNN on multiple map sizes simultaneously
+2. Test transfer learning: pre-train on small maps, fine-tune on large
+3. Measure generalization to unseen map sizes
+4. Optional: Implement GAT architecture for comparison
 
 **References for Implementation:**
 - OpenAI Five reward shaping: https://openai.com/research/openai-five
