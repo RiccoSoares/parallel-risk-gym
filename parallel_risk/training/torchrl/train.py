@@ -278,7 +278,7 @@ class PPOTrainer:
 
         advantages_flat = advantages.view(-1)
         returns_flat = returns.view(-1)
-        old_log_probs_flat = torch.cat([lp.sum(dim=1) for lp in rollout['log_probs']])  # Sum over action_budget
+        old_log_probs_flat = torch.cat([lp.sum(dim=1) for lp in rollout['log_probs']]).detach()  # Sum over action_budget, detach to prevent gradient flow
 
         # Multiple epochs of SGD
         for epoch in range(self.num_epochs):
