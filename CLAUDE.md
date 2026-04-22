@@ -91,7 +91,10 @@ Four reward components can be enabled independently:
   - **evaluation/** - Evaluation infrastructure (evaluate_agent, league_evaluator, visualize, league_visualize)
 - **tests/** - Test suite (mechanics, combat, regions, run, reward_shaping, rllib_wrapper)
 - **examples/** - Usage examples (reward_shaping_demo.py)
-- **experiments/** - Research experiment scripts (validate_learning, self_play_league)
+- **experiments/** - Research experiment scripts
+  - **validate_learning.py** - Phase 1 (RLlib) validation experiment
+  - **validate_gnn_learning.py** - Phase 2 (TorchRL/GNN) validation experiment
+  - **self_play_league.py** - Self-play league experiment (RLlib)
 - **docs/** - Design documentation
   - DESIGN_NOTES.md - Deep dive into design decisions
   - COMBAT_SYSTEM.md - Complete combat mechanics
@@ -152,7 +155,7 @@ python -m parallel_risk.training.rllib.train \
 
 ### Phase 2: TorchRL + GNN Training
 
-**Status:** Phase 2.1-2.3 Complete - Training pipeline fully functional
+**Status:** Phase 2 Complete - Training pipeline functional, recent PPO bugs fixed
 
 ```bash
 # Short test run (20 iterations, ~2 minutes)
@@ -170,17 +173,25 @@ See `docs/TORCHRL_GNN_GUIDE.md` for Phase 2 details.
 
 ### Configuration
 
-Edit `parallel_risk/training/rllib/configs/ppo_baseline.yaml` to customize:
+**RLlib (Phase 1):** Edit configs in `parallel_risk/training/rllib/configs/`:
+- `ppo_baseline.yaml` - Standard PPO with sparse rewards
+- `ppo_dense.yaml` - PPO with dense reward shaping
+- `ppo_sparse.yaml` - PPO with sparse rewards (alternative config)
+
+**TorchRL (Phase 2):** Edit configs in `parallel_risk/training/torchrl/configs/`:
+- `gnn_gcn.yaml` - GNN with Graph Convolutional Networks
+
+All configs support customizing:
 - Environment (map, action budget, reward shaping)
 - PPO hyperparameters (learning rate, clip param, etc.)
 - Training settings (workers, batch size, GPUs)
 - Network architecture
 
-See `docs/RLLIB_INTEGRATION.md` for complete guide.
+See `docs/RLLIB_INTEGRATION.md` and `docs/TORCHRL_GNN_GUIDE.md` for complete guides.
 
 ## Research Experiments
 
-### Self-Play League Experiment
+### Self-Play League Experiment (RLlib)
 
 Comprehensive experiment that trains with self-play and evaluates learning against both random baseline AND historical policy snapshots:
 
@@ -196,7 +207,7 @@ PYTHONPATH=. python experiments/self_play_league.py \
 
 # Full experiment (500 iterations, ~2-3 hours)
 PYTHONPATH=. python experiments/self_play_league.py \
-    --config parallel_risk/training/configs/ppo_sparse.yaml \
+    --config parallel_risk/training/rllib/configs/ppo_sparse.yaml \
     --num-iterations 500 \
     --snapshot-interval 50 \
     --eval-interval 50 \
@@ -213,15 +224,21 @@ PYTHONPATH=. python experiments/self_play_league.py \
 
 See `docs/SELF_PLAY_LEAGUE.md` for complete guide.
 
-### Validation Experiment (Random-Only)
+### Validation Experiments
 
-Simple validation that trains and evaluates against random opponent only:
+**Phase 1 (RLlib):** Validate MLP-based PPO training against random opponent:
 
 ```bash
 PYTHONPATH=. python experiments/validate_learning.py --num-iterations 500
 ```
 
-See validation script for details.
+**Phase 2 (TorchRL/GNN):** Validate GNN-based PPO training against random opponent:
+
+```bash
+PYTHONPATH=. python experiments/validate_gnn_learning.py --num-iterations 200
+```
+
+Both scripts train the agent, evaluate checkpoints periodically, and generate learning curves.
 
 ## Adding New Features
 
@@ -305,8 +322,8 @@ print(infos['agent_0']['reward_components'])
 - **docs/COMBAT_SYSTEM.md** - Complete combat mechanics with mathematical analysis
 - **docs/REWARD_SHAPING.md** - RL reward shaping guide with component details, tuning guidelines, and validation checklist
 - **docs/RLLIB_INTEGRATION.md** - Phase 1: Complete guide to training with RLlib (installation, configuration, troubleshooting)
-- **docs/TORCHRL_GNN_GUIDE.md** - Phase 2: TorchRL + GNN training guide (skeleton, implementation pending)
-- **docs/RL_TRAINING_ROADMAP.md** - Two-phase plan for RL training: Phase 1 (RLlib baseline) complete, Phase 2 (GNN) in progress
+- **docs/TORCHRL_GNN_GUIDE.md** - Phase 2: TorchRL + GNN training guide
+- **docs/RL_TRAINING_ROADMAP.md** - Two-phase plan for RL training (both phases complete)
 - **docs/SELF_PLAY_LEAGUE.md** - Self-play league experiment guide
 - **docs/REWARD_SHAPING_SUMMARY.md** - Implementation summary for reward shaping (Phase 1.1)
 - **docs/RLLIB_INTEGRATION_SUMMARY.md** - Implementation summary for RLlib integration (Phase 1.2)
