@@ -184,17 +184,23 @@ Each action is a triple: `[source, destination, num_troops]`
 
 ### Combat
 
-Deterministic percentage-based system:
-- Defender loses: 60% of attacking troops (rounded down)
-- Attacker loses: 70% of defending troops (rounded down)
+Deterministic percentage-based system with **attacker advantage**:
+- Defender loses: 70% of attacking troops (rounded down)
+- Attacker loses: 60% of defending troops (rounded down)
 - Attacker captures if defenders reduced to ≤0
+- **Surviving attackers return to source on failed attacks**
 
 **Example:** 10 attackers vs 6 defenders
-- Defender: 6 - (10 × 0.6) = 0 (eliminated)
-- Attacker: 10 - (6 × 0.7) = 6 survivors
+- Defender: 6 - (10 × 0.7) = -1 (eliminated)
+- Attacker: 10 - (6 × 0.6) = 6 survivors
 - Result: Attacker captures with 6 troops
 
-**Strategic note:** Need ~1.67× defender force to reliably capture.
+**Example:** 10 attackers vs 15 defenders (failed attack)
+- Defender: 15 - (10 × 0.7) = 8 (holds territory)
+- Attacker: 10 - (15 × 0.6) = 1 (returns to source)
+- Result: Defender holds, 1 attacker returns home
+
+**Strategic note:** Need ~1.43× defender force to reliably capture. Combat favors aggressive play.
 
 ### Turn Flow
 
