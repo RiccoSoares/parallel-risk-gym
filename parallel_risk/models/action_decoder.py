@@ -30,6 +30,9 @@ class ActionDecoder:
         self,
         action_budget: int = 5,
         max_troops: int = 20,
+        mask_source: bool = False,
+        mask_dest: bool = False,
+        mask_troops: bool = False,
     ):
         """
         Initialize action decoder.
@@ -37,16 +40,23 @@ class ActionDecoder:
         Args:
             action_budget: Number of actions to output per turn
             max_troops: Maximum troops per action
+            mask_source: Enable source territory masking
+            mask_dest: Enable destination territory masking
+            mask_troops: Enable troops masking
         """
         self.action_budget = action_budget
         self.max_troops = max_troops
+        self.mask_source = mask_source
+        self.mask_dest = mask_dest
+        self.mask_troops = mask_troops
 
     def decode_actions(
         self,
         action_logits: List[Dict[str, torch.Tensor]],
         batch: torch.Tensor,
         deterministic: bool = False,
-        return_log_probs: bool = False
+        return_log_probs: bool = False,
+        observations: List = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Decode actions from GCN policy logits.
@@ -60,6 +70,7 @@ class ActionDecoder:
             batch: [num_nodes] batch assignment for each node
             deterministic: If True, use argmax; if False, sample
             return_log_probs: If True, also return log probabilities
+            observations: List of PyG Data observations (for masking)
 
         Returns:
             actions: [batch_size, action_budget, 3] sampled actions
@@ -83,11 +94,24 @@ class ActionDecoder:
             for graph_idx in range(batch_size):
                 # Get nodes belonging to this graph
                 node_mask = (batch == graph_idx)
-                graph_source_scores = source_scores[node_mask]  # [n_territories_i]
-                graph_dest_scores = dest_scores[node_mask]      # [n_territories_i]
-                graph_troops_logits = troops_logits[graph_idx]  # [max_troops]
+                graph_source_scores = source_scores[node_mask].clone()  # [n_territories_i]
+                graph_dest_scores = dest_scores[node_mask].clone()      # [n_territories_i]
+                graph_troops_logits = troops_logits[graph_idx].clone()  # [max_troops]
 
                 n_territories = graph_source_scores.size(0)
+
+                # Apply action masking if enabled
+                if self.mask_source and observations is not None:
+                    source_mask = self._compute_source_mask(observations[graph_idx])
+                    graph_source_scores[~source_mask] = -1e10
+
+                if self.mask_dest and observations is not None:
+                    dest_mask = self._compute_dest_mask(observations[graph_idx])
+                    graph_dest_scores[~dest_mask] = -1e10
+
+                if self.mask_troops and observations is not None:
+                    troops_mask = self._compute_troops_mask(observations[graph_idx])
+                    graph_troops_logits[~troops_mask] = -1e10
 
                 # Sample source territory
                 if deterministic:
@@ -251,6 +275,95 @@ class ActionDecoder:
 
         entropies = torch.stack(all_entropies, dim=1)  # [batch_size, action_budget]
         return entropies
+
+    def _compute_source_mask(self, observation) -> torch.Tensor:
+        """Compute source territory mask from observation.
+
+        Args:
+            observation: PyG Data object with node features
+
+        Returns:
+            Boolean mask [n_territories] where True = owned by agent
+        """
+        # Extract ownership from node features
+        # Node features: [troops_norm, ownership, in_degree, region_one_hot...]
+        # ownership is at index 1
+        ownership = observation.x[:, 1]  # [n_territories]
+
+        # ownership == 1 means owned by this agent
+        return ownership == 1
+
+    def _compute_dest_mask(self, observation) -> torch.Tensor:
+        """Compute conservative destination territory mask.
+
+        Conservative: Allow destinations that are owned or adjacent to any owned territory.
+
+        Args:
+            observation: PyG Data object
+
+        Returns:
+            Boolean mask [n_territories] where True = valid destination
+        """
+        n_territories = observation.num_nodes
+        ownership = observation.x[:, 1]  # [n_territories]
+
+        # Start with owned territories (valid for deploy)
+        dest_mask = (ownership == 1)
+
+        # Add territories adjacent to owned territories
+        edge_index = observation.edge_index  # [2, num_edges]
+
+        for territory in range(n_territories):
+            if ownership[territory] == 1:
+                # Find all neighbors of this owned territory
+                neighbors = edge_index[1, edge_index[0] == territory]
+                dest_mask[neighbors] = True
+
+        return dest_mask
+
+    def _compute_troops_mask(self, observation) -> torch.Tensor:
+        """Compute conservative troops mask.
+
+        Conservative: Safe for both deploy and transfer/attack actions.
+
+        Args:
+            observation: PyG Data object
+
+        Returns:
+            Boolean mask [max_troops] where True = valid troop count
+        """
+        # Extract ownership and troops from node features
+        ownership = observation.x[:, 1]  # [n_territories]
+        troops_norm = observation.x[:, 0]  # [n_territories], normalized
+        troops = (troops_norm * 100).long()  # Denormalize
+
+        # Get income from global features
+        # global_features: [income_norm, turn_norm, region_control...]
+        income_norm = observation.global_features[0]
+        income = (income_norm * 20).long()  # Denormalize (max income ~20)
+
+        # Owned territories
+        owned_mask = (ownership == 1)
+        owned_troops = troops[owned_mask]
+
+        # Conservative max for transfers/attacks
+        if owned_troops.numel() > 0:
+            min_transferable = max(0, int(owned_troops.min().item()) - 1)
+        else:
+            min_transferable = 0
+
+        # Safe maximum is the MAXIMUM of:
+        # - Available income (for deploy actions)
+        # - Minimum transferable troops (for transfer/attack actions)
+        # We use max because any action uses EITHER deploy OR transfer, not both
+        safe_max = max(int(income.item()), min_transferable)
+
+        # Create mask
+        mask = torch.zeros(self.max_troops, dtype=torch.bool, device=observation.x.device)
+        if safe_max > 0:
+            mask[1:min(safe_max + 1, self.max_troops)] = True
+
+        return mask
 
 
 def convert_to_env_format(actions: torch.Tensor) -> Dict[str, any]:
