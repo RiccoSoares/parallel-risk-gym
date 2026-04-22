@@ -27,6 +27,64 @@ from parallel_risk.models.gnn_gcn import GCNPolicy
 from parallel_risk.models.action_decoder import ActionDecoder
 
 
+class RunningMeanStd:
+    """
+    Track running mean and standard deviation for normalization.
+
+    Used to normalize value function targets for stable training.
+    """
+
+    def __init__(self, epsilon: float = 1e-8):
+        """
+        Initialize running statistics.
+
+        Args:
+            epsilon: Small constant for numerical stability
+        """
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = 0
+        self.epsilon = epsilon
+
+    def update(self, x: torch.Tensor):
+        """
+        Update running statistics with new batch of data.
+
+        Uses Welford's online algorithm for numerical stability.
+
+        Args:
+            x: Tensor of values to update statistics with
+        """
+        batch_mean = torch.mean(x).item()
+        batch_var = torch.var(x).item()
+        batch_count = x.numel()
+
+        delta = batch_mean - self.mean
+        total_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / total_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + delta**2 * self.count * batch_count / total_count
+        new_var = M2 / total_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = total_count
+
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize values using running statistics.
+
+        Args:
+            x: Tensor to normalize
+
+        Returns:
+            Normalized tensor with mean ≈ 0, std ≈ 1
+        """
+        return (x - self.mean) / (torch.sqrt(torch.tensor(self.var)) + self.epsilon)
+
+
 class PPOTrainer:
     """
     PPO trainer for GNN policies on Parallel Risk.
@@ -99,6 +157,9 @@ class PPOTrainer:
         # Optimizer
         self.optimizer = optim.Adam(self.policy.parameters(), lr=self.learning_rate)
 
+        # Running statistics for value normalization (Bug #3 fix)
+        self.return_rms = RunningMeanStd()
+
         # TensorBoard logging
         log_dir = config.get('log_dir', 'runs/gnn_training')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -131,6 +192,7 @@ class PPOTrainer:
             'log_probs': [],
             'dones': [],
             'batches': [],  # Batch indices for graph data
+            'next_obs': None,  # Next observation for GAE bootstrapping (Bug #2 fix)
         }
 
         # Reset environment
@@ -209,16 +271,26 @@ class PPOTrainer:
             else:
                 obs = next_obs
 
+        # Store final observation for GAE bootstrapping (Bug #2 fix)
+        # If episode ended, obs is already the new episode start state
+        # Otherwise, obs is the next state we would have stepped from
+        if len(obs) > 0:
+            graphs = [obs[agent] for agent in sorted(obs.keys())]
+            rollout['next_obs'] = Batch.from_data_list(graphs)
+
         return rollout
 
-    def compute_gae(self, rewards, values, dones):
+    def compute_gae(self, rewards, values, dones, next_obs=None):
         """
         Compute Generalized Advantage Estimation (GAE).
+
+        Bug #2 Fix: Now properly bootstraps from next state value for non-terminal states.
 
         Args:
             rewards: List of reward tensors [batch_size]
             values: List of value tensors [batch_size]
             dones: List of done flags [batch_size]
+            next_obs: Next observation for bootstrapping (optional)
 
         Returns:
             advantages: Tensor of advantages
@@ -237,17 +309,30 @@ class PPOTrainer:
         returns = []
 
         gae = torch.zeros(batch_size, device=self.device)
-        next_value = torch.zeros(batch_size, device=self.device)
 
-        # Reverse iteration
+        # Bootstrap from next state value for non-terminal states (Bug #2 fix)
+        if next_obs is not None:
+            with torch.no_grad():
+                _, next_value, _ = self.policy(next_obs)
+                next_value = next_value.squeeze(-1)  # [batch_size]
+        else:
+            next_value = torch.zeros(batch_size, device=self.device)
+
+        # Reverse iteration through trajectory
         for t in reversed(range(len(rewards))):
+            # Mask out value for terminal states
             mask = 1.0 - dones[t].float()
+
+            # TD error: δ_t = r_t + γ * V(s_{t+1}) - V(s_t)
             delta = rewards[t] + self.gamma * next_value * mask - values[t]
+
+            # GAE: A_t = δ_t + (γλ) * A_{t+1}
             gae = delta + self.gamma * self.gae_lambda * mask * gae
 
             advantages.insert(0, gae.clone())
             returns.insert(0, gae + values[t])
 
+            # Update next_value for previous timestep
             next_value = values[t]
 
         advantages = torch.stack(advantages)
@@ -262,22 +347,27 @@ class PPOTrainer:
         Args:
             rollout: Collected experience
         """
-        # Compute advantages
+        # Compute advantages with proper bootstrapping (Bug #2 fix)
         advantages, returns = self.compute_gae(
             rollout['rewards'],
             rollout['values'],
-            rollout['dones']
+            rollout['dones'],
+            rollout['next_obs']  # Pass next observation for bootstrapping
         )
 
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # Update return statistics and normalize returns (Bug #3 fix)
+        returns_flat = returns.view(-1)
+        self.return_rms.update(returns_flat)
+        returns_normalized = self.return_rms.normalize(returns_flat)
 
         # Flatten timestep dimension
         T = len(rollout['observations'])
         B = rollout['rewards'][0].size(0)
 
         advantages_flat = advantages.view(-1)
-        returns_flat = returns.view(-1)
         old_log_probs_flat = torch.cat([lp.sum(dim=1) for lp in rollout['log_probs']]).detach()  # Sum over action_budget, detach to prevent gradient flow
 
         # Multiple epochs of SGD
@@ -317,8 +407,8 @@ class PPOTrainer:
             surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages_flat
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            # Value loss
-            value_loss = nn.functional.mse_loss(new_values_flat, returns_flat)
+            # Value loss - now uses normalized returns (Bug #3 fix)
+            value_loss = nn.functional.mse_loss(new_values_flat, returns_normalized)
 
             # Entropy bonus
             entropy_loss = -entropies_flat.mean()
@@ -338,6 +428,9 @@ class PPOTrainer:
                 self.writer.add_scalar('Loss/value', value_loss.item(), self.global_step)
                 self.writer.add_scalar('Loss/entropy', entropy_loss.item(), self.global_step)
                 self.writer.add_scalar('Loss/total', loss.item(), self.global_step)
+                # Log return statistics for monitoring (Bug #3 related)
+                self.writer.add_scalar('Stats/return_mean', self.return_rms.mean, self.global_step)
+                self.writer.add_scalar('Stats/return_std', torch.sqrt(torch.tensor(self.return_rms.var)).item(), self.global_step)
 
         self.global_step += 1
 
