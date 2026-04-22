@@ -15,7 +15,7 @@ Given `x` attacking troops and `y` defending troops:
    - Otherwise: **Defender holds**
      - Territory remains with defender
      - Defenders reduced to `y - defender_casualties`
-     - All attacking troops are lost
+     - Surviving attackers return to source territory: `max(0, x - attacker_casualties)`
 
 ### Mathematical Properties
 
@@ -34,19 +34,20 @@ To capture a territory, attacker needs:
 
 | Attackers | Defenders | Def. Casualties | Att. Casualties | Def. Remaining | Result | Survivors |
 |-----------|-----------|-----------------|-----------------|----------------|--------|-----------|
-| 10 | 5 | 6 | 3 | -1 | ✅ Attacker wins | 7 |
-| 10 | 10 | 6 | 7 | 4 | ❌ Defender holds | 4 defenders |
-| 10 | 15 | 6 | 10 | 9 | ❌ Defender holds | 9 defenders |
-| 20 | 10 | 12 | 7 | -2 | ✅ Attacker wins | 13 |
-| 5 | 8 | 3 | 5 | 5 | ❌ Defender holds | 5 defenders |
-| 17 | 10 | 10 | 7 | 0 | ✅ Attacker wins | 10 |
+| 10 | 5 | 6 | 3 | -1 | ✅ Attacker wins | 7 at dest |
+| 10 | 10 | 6 | 7 | 4 | ❌ Defender holds | 4 defenders, 3 attackers return |
+| 10 | 15 | 6 | 10 | 9 | ❌ Defender holds | 9 defenders, 0 attackers return |
+| 20 | 10 | 12 | 7 | -2 | ✅ Attacker wins | 13 at dest |
+| 5 | 8 | 3 | 5 | 5 | ❌ Defender holds | 5 defenders, 0 attackers return |
+| 17 | 10 | 10 | 7 | 0 | ✅ Attacker wins | 10 at dest |
 
 ### Strategic Implications
 
 **For Attackers:**
 - Need ~2× forces for reliable capture (accounting for casualties)
 - Overwhelming force is efficient (20 vs 10 → keep 13)
-- Small attacks usually fail (10 vs 15 → lose all 10)
+- Failed attacks now less punishing - surviving troops return home
+- Can probe defenses with smaller attacks to test strength
 
 **For Defenders:**
 - Even small forces can hold (5 defenders survive 10 attackers)
@@ -72,8 +73,10 @@ Covers:
 
 ### Balance Notes
 
-Current ratios (60% / 70%) create:
-- **Defender advantage**: Loses fewer troops proportionally
-- **Attacker threshold**: Needs ~1.67× to win
-- **Economic warfare**: Draining enemy troops is viable even without capture
+Current ratios (60% / 70%) with survivor return create:
+- **Moderate defender advantage**: Defenders lose fewer troops proportionally (60% vs 70%)
+- **Attacker threshold**: Needs ~1.67× defender troops to successfully capture
+- **Reduced attack penalty**: Failed attacks return survivors, making aggressive play more viable
+- **Economic warfare**: Both sides can inflict casualties without captures, but failed attacks now less punishing
+- **Encourages probing**: Attackers can test defenses with smaller forces since survivors return
 

@@ -35,8 +35,11 @@ Territory ownership is encoded as `1=self, -1=enemy` from each agent's perspecti
 - Defender casualties: 60% of attacking troops
 - Attacker casualties: 70% of defending troops
 - Attacker needs ~1.67× defender force to reliably capture
+- **Surviving attackers return to source on failed attacks**
 
 **Why deterministic:** Predictable outcomes, easier to learn optimal strategies, reduces variance in training.
+
+**Why return survivors:** Previously, all attacking troops were lost on failed attacks, creating extreme defensive bias. Returning survivors makes aggressive play more viable while maintaining moderate defender advantage.
 
 ### 4. Action Resolution: Random Shuffle
 
