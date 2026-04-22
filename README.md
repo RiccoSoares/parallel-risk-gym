@@ -293,11 +293,47 @@ MapRegistry.register("custom_8", create_custom_8_map)
 
 ### Action Masking
 
-For improved training efficiency, implement action masking using the observation space. See [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) for implementation examples.
+Without action masking, untrained policies produce 95-98% invalid actions, preventing learning. With masking, this improves to ~40% valid actions.
+
+**Built-in masking wrappers available:**
+
+```python
+# RLlib
+from parallel_risk.training.rllib.masked_wrapper import MaskedRLlibParallelRiskEnv
+
+env = MaskedRLlibParallelRiskEnv({
+    "map_name": "simple_6",
+    "action_budget": 5,
+    "mask_source": True,   # Mask non-owned territories
+    "mask_dest": True,     # Mask non-adjacent destinations
+    "mask_troops": True,   # Mask invalid troop counts
+})
+
+# TorchRL
+from parallel_risk.models.action_decoder import ActionDecoder
+
+decoder = ActionDecoder(
+    action_budget=5,
+    max_troops=20,
+    mask_source=True,   # Mask non-owned territories
+    mask_dest=True,     # Mask non-adjacent destinations  
+    mask_troops=True,   # Mask invalid troop counts
+)
+```
+
+**Masking strategies:**
+- **Source masking:** Only allow owned territories (+6pp improvement)
+- **Destination masking:** Only allow owned or adjacent territories (+0-2pp)
+- **Troops masking:** Conservative bounds based on income/available troops (+28pp)
+
+**Result:** 6-8× improvement (5-7% → ~41% valid actions)
+
+See [docs/ACTION_MASKING.md](docs/ACTION_MASKING.md) for complete guide and implementation details.
 
 ## Documentation
 
 - [CLAUDE.md](CLAUDE.md) - Project guide for Claude Code agents
+- [docs/ACTION_MASKING.md](docs/ACTION_MASKING.md) - **Action masking guide (essential for training)**
 - [docs/VALIDATION_EXPERIMENT.md](docs/VALIDATION_EXPERIMENT.md) - Learning validation experiment
 - [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) - Design decisions and extension ideas
 - [docs/COMBAT_SYSTEM.md](docs/COMBAT_SYSTEM.md) - Combat mechanics deep dive
