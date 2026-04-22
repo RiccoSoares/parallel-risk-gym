@@ -6,8 +6,8 @@ class CombatResolver:
         """Resolve combat deterministically
 
         Rules:
-        - Defenders lose 60% of attacking troops (rounded down)
-        - Attackers lose 70% of defending troops (rounded down)
+        - Defenders lose 70% of attacking troops (rounded down)
+        - Attackers lose 60% of defending troops (rounded down)
         - If defenders reduced to <= 0: attacker wins and captures territory
         - Otherwise: defender holds with remaining troops
 
@@ -21,8 +21,8 @@ class CombatResolver:
                 surviving_troops: Troops remaining after combat
         """
         # Calculate casualties
-        defender_casualties = int(attacking_troops * 0.6)
-        attacker_casualties = int(defending_troops * 0.7)
+        defender_casualties = int(attacking_troops * 0.7)
+        attacker_casualties = int(defending_troops * 0.6)
 
         # Apply casualties
         defenders_remaining = defending_troops - defender_casualties
