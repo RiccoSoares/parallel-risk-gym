@@ -189,7 +189,10 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
                 self.game_state['territory_ownership'][dest] = agent_idx
                 self.game_state['territory_troops'][dest] = surviving_troops
             else:
-                # Defender holds
+                # Defender holds - return surviving attackers to source
+                attacker_casualties = int(defending_troops * 0.6)
+                attackers_surviving = max(0, troops - attacker_casualties)
+                self.game_state['territory_troops'][source] += attackers_surviving
                 self.game_state['territory_troops'][dest] = surviving_troops
 
     def _check_termination(self):

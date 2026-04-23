@@ -7,8 +7,8 @@ def test_combat_mechanics():
     print("TEST: New Combat Mechanics")
     print("="*60)
     print("\nRules:")
-    print("  - Defenders lose 60% of attacking troops")
-    print("  - Attackers lose 70% of defending troops")
+    print("  - Defenders lose 70% of attacking troops")
+    print("  - Attackers lose 60% of defending troops")
     print("  - Attacker wins if defenders <= 0")
 
     env = ParallelRiskEnv()
@@ -44,9 +44,9 @@ def test_combat_mechanics():
     obs, rewards, terms, truncs, infos = env.step(actions)
 
     print("\nCombat calculation:")
-    print(f"  Defender casualties: 60% of 10 = 6")
-    print(f"  Attacker casualties: 70% of 5 = 3.5 → 3")
-    print(f"  Defenders remaining: 5 - 6 = -1 → ATTACKER WINS")
+    print(f"  Defender casualties: 70% of 10 = 7")
+    print(f"  Attacker casualties: 60% of 5 = 3")
+    print(f"  Defenders remaining: 5 - 7 = -2 → ATTACKER WINS")
     print(f"  Attackers remaining: 10 - 3 = 7")
 
     print("\nAfter attack:")
@@ -84,15 +84,15 @@ def test_combat_mechanics():
     obs, rewards, terms, truncs, infos = env.step(actions)
 
     print("\nCombat calculation:")
-    print(f"  Defender casualties: 60% of 10 = 6")
-    print(f"  Attacker casualties: 70% of 15 = 10.5 → 10")
-    print(f"  Defenders remaining: 15 - 6 = 9 → DEFENDER HOLDS")
-    print(f"  Attackers remaining: 10 - 10 = 0 (all lost)")
+    print(f"  Defender casualties: 70% of 10 = 7")
+    print(f"  Attacker casualties: 60% of 15 = 9")
+    print(f"  Defenders remaining: 15 - 7 = 8 → DEFENDER HOLDS")
+    print(f"  Attackers remaining: 10 - 9 = 1 (returns to source)")
 
     print("\nAfter attack:")
-    print(f"  Territory 1 (agent_0): {env.game_state['territory_troops'][1]} troops (should be 1)")
+    print(f"  Territory 1 (agent_0): {env.game_state['territory_troops'][1]} troops (should be 2: 11 - 10 + 1)")
     print(f"  Territory 2: {env.game_state['territory_troops'][2]} troops, owner: agent_{env.game_state['territory_ownership'][2]}")
-    print(f"  Expected: Territory 2 still owned by agent_1 with 9 troops")
+    print(f"  Expected: Territory 2 still owned by agent_1 with 8 troops, Territory 1 has 2 troops")
 
     print("\n" + "="*60)
     print("Scenario 3: 20 attackers vs 10 defenders")
@@ -124,15 +124,15 @@ def test_combat_mechanics():
     obs, rewards, terms, truncs, infos = env.step(actions)
 
     print("\nCombat calculation:")
-    print(f"  Defender casualties: 60% of 20 = 12")
-    print(f"  Attacker casualties: 70% of 10 = 7")
-    print(f"  Defenders remaining: 10 - 12 = -2 → ATTACKER WINS")
-    print(f"  Attackers remaining: 20 - 7 = 13")
+    print(f"  Defender casualties: 70% of 20 = 14")
+    print(f"  Attacker casualties: 60% of 10 = 6")
+    print(f"  Defenders remaining: 10 - 14 = -4 → ATTACKER WINS")
+    print(f"  Attackers remaining: 20 - 6 = 14")
 
     print("\nAfter attack:")
     print(f"  Territory 1 (agent_0): {env.game_state['territory_troops'][1]} troops (should be 1)")
     print(f"  Territory 2: {env.game_state['territory_troops'][2]} troops, owner: agent_{env.game_state['territory_ownership'][2]}")
-    print(f"  Expected: Territory 2 captured by agent_0 with 13 troops")
+    print(f"  Expected: Territory 2 captured by agent_0 with 14 troops")
 
     print("\n" + "="*60)
     print("Scenario 4: Edge case - Equal forces (10 vs 10)")
@@ -164,14 +164,15 @@ def test_combat_mechanics():
     obs, rewards, terms, truncs, infos = env.step(actions)
 
     print("\nCombat calculation:")
-    print(f"  Defender casualties: 60% of 10 = 6")
-    print(f"  Attacker casualties: 70% of 10 = 7")
-    print(f"  Defenders remaining: 10 - 6 = 4 → DEFENDER HOLDS")
-    print(f"  Attackers remaining: 10 - 7 = 3 (lost)")
+    print(f"  Defender casualties: 70% of 10 = 7")
+    print(f"  Attacker casualties: 60% of 10 = 6")
+    print(f"  Defenders remaining: 10 - 7 = 3 → DEFENDER HOLDS")
+    print(f"  Attackers remaining: 10 - 6 = 4 (return to source)")
 
     print("\nAfter attack:")
+    print(f"  Territory 1 (agent_0): {env.game_state['territory_troops'][1]} troops (should be 5: 11 - 10 + 4)")
     print(f"  Territory 2: {env.game_state['territory_troops'][2]} troops, owner: agent_{env.game_state['territory_ownership'][2]}")
-    print(f"  Expected: Territory 2 still owned by agent_1 with 4 troops")
+    print(f"  Expected: Territory 2 still owned by agent_1 with 3 troops, Territory 1 has 5 troops")
 
     print("\n" + "="*60)
     print("✅ ALL COMBAT TESTS COMPLETE")
