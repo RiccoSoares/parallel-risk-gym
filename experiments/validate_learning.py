@@ -138,7 +138,7 @@ def run_training(config_path, num_iterations, checkpoint_dir, num_workers=4, ver
 
     # Build training command
     cmd = [
-        sys.executable, "-m", "parallel_risk.training.train_rllib",
+        sys.executable, "-m", "parallel_risk.training.rllib.train",
         "--config", str(config_path),
         "--num-iterations", str(num_iterations),
         "--checkpoint-dir", str(checkpoint_dir),
