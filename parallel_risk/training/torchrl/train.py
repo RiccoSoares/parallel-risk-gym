@@ -22,6 +22,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch_geometric.data import Batch
 
 from parallel_risk import ParallelRiskEnv
+from parallel_risk.env.reward_shaping import RewardShapingConfig
 from parallel_risk.training.torchrl.graph_wrapper import GraphObservationWrapper, env_to_graph
 from parallel_risk.models.gnn_gcn import GCNPolicy
 from parallel_risk.models.action_decoder import ActionDecoder
@@ -108,10 +109,17 @@ class PPOTrainer:
 
         # Create environment to get observation/action space info
         env_config = config['env']
+
+        # Setup reward shaping if enabled
+        reward_shaping_config = None
+        if env_config.get('use_reward_shaping', True):  # Default to True
+            reward_shaping_config = RewardShapingConfig()  # Uses default (all enabled)
+
         self.env = ParallelRiskEnv(
             map_name=env_config['map_name'],
             max_turns=env_config.get('max_turns', 100),
-            seed=env_config.get('seed', None)
+            seed=env_config.get('seed', None),
+            reward_shaping_config=reward_shaping_config
         )
         self.wrapped_env = GraphObservationWrapper(self.env, device=self.device)
 

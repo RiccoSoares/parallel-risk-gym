@@ -5,6 +5,7 @@ env:
   max_turns: 100
   action_budget: 5
   seed: null  # Set to integer for reproducibility
+  use_reward_shaping: true  # Enable dense reward shaping (conquest, territory control, etc.)
 
 model:
   type: "gcn"
