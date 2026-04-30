@@ -353,8 +353,13 @@ class ActionDecoder:
         troops = (troops_norm * 100).long()  # Denormalize
 
         # Get income from global features
-        # global_features: [income_norm, turn_norm, region_control...]
-        income_norm = observation.global_features[0]
+        # global_features: [1, dim] where dim = [income_norm, turn_norm, region_control...]
+        # After batching fix, global_features is always 2D
+        gf = observation.global_features
+        if gf.dim() == 2:
+            income_norm = gf[0, 0]  # First element of first (only) row
+        else:
+            income_norm = gf[0]  # Fallback for 1D
         income = (income_norm * 20).long()  # Denormalize (max income ~20)
 
         # Owned territories
