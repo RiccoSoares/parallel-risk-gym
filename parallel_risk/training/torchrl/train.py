@@ -148,10 +148,13 @@ class PPOTrainer:
             dropout=model_config.get('dropout', 0.1)
         ).to(self.device)
 
-        # Create action decoder
+        # Create action decoder with action masking enabled
         self.action_decoder = ActionDecoder(
             action_budget=self.action_budget,
-            max_troops=20
+            max_troops=20,
+            mask_source=True,
+            mask_dest=True,
+            mask_troops=True,
         )
 
         # Optimizer
@@ -218,9 +221,10 @@ class PPOTrainer:
             with torch.no_grad():
                 action_logits, values, _ = self.policy(batched_graph)
 
-            # Sample actions
+            # Sample actions with masking using graph observations
             actions_tensor, log_probs = self.action_decoder.decode_actions(
-                action_logits, batched_graph.batch, deterministic=False, return_log_probs=True
+                action_logits, batched_graph.batch, deterministic=False, return_log_probs=True,
+                observations=graphs
             )
 
             # Convert actions to environment format
@@ -358,26 +362,36 @@ class PPOTrainer:
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Update return statistics and normalize returns (Bug #3 fix)
+        # Flatten returns for value loss
+        # REMOVED: Value normalization - was causing catastrophic forgetting
+        # The value network predicts unnormalized returns, so we train on unnormalized targets
         returns_flat = returns.view(-1)
-        self.return_rms.update(returns_flat)
-        returns_normalized = self.return_rms.normalize(returns_flat)
 
         # Flatten timestep dimension
         T = len(rollout['observations'])
         B = rollout['rewards'][0].size(0)
 
-        advantages_flat = advantages.view(-1)
-        old_log_probs_flat = torch.cat([lp.sum(dim=1) for lp in rollout['log_probs']]).detach()  # Sum over action_budget, detach to prevent gradient flow
+        # Prepare per-timestep tensors for shuffling
+        advantages_per_timestep = [advantages[t] for t in range(T)]  # List of [B] tensors
+        old_log_probs_per_timestep = [rollout['log_probs'][t].sum(dim=1).detach() for t in range(T)]  # List of [B] tensors
+        returns_per_timestep = [returns[t] for t in range(T)]  # List of [B] tensors
 
-        # Multiple epochs of SGD
+        # Multiple epochs of SGD with shuffled timesteps
+        # Shuffling reduces overfitting to temporal ordering in small batches
         for epoch in range(self.num_epochs):
-            # Compute new log probs and values
+            # Shuffle timestep indices for this epoch
+            timestep_indices = torch.randperm(T)
+
+            # Compute new log probs and values in shuffled order
             all_new_log_probs = []
             all_new_values = []
             all_entropies = []
+            all_advantages = []
+            all_old_log_probs = []
+            all_returns = []
 
-            for t in range(T):
+            for idx in timestep_indices:
+                t = idx.item()
                 action_logits, values, _ = self.policy(rollout['observations'][t])
 
                 # Compute log probs for actions taken
@@ -397,9 +411,17 @@ class PPOTrainer:
                 all_new_values.append(values.squeeze(-1))
                 all_entropies.append(entropy.mean(dim=1))  # Mean over action_budget
 
+                # Gather corresponding old values in same shuffled order
+                all_advantages.append(advantages_per_timestep[t])
+                all_old_log_probs.append(old_log_probs_per_timestep[t])
+                all_returns.append(returns_per_timestep[t])
+
             new_log_probs_flat = torch.cat(all_new_log_probs)
             new_values_flat = torch.cat(all_new_values)
             entropies_flat = torch.cat(all_entropies)
+            advantages_flat = torch.cat(all_advantages)
+            old_log_probs_flat = torch.cat(all_old_log_probs)
+            returns_flat = torch.cat(all_returns)
 
             # PPO policy loss
             ratio = torch.exp(new_log_probs_flat - old_log_probs_flat)
@@ -407,8 +429,10 @@ class PPOTrainer:
             surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages_flat
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            # Value loss - now uses normalized returns (Bug #3 fix)
-            value_loss = nn.functional.mse_loss(new_values_flat, returns_normalized)
+            # Value loss - using unnormalized returns
+            # (Fixed catastrophic forgetting bug: was training on normalized targets
+            #  but value network outputs unnormalized predictions)
+            value_loss = nn.functional.mse_loss(new_values_flat, returns_flat)
 
             # Entropy bonus
             entropy_loss = -entropies_flat.mean()
@@ -428,9 +452,9 @@ class PPOTrainer:
                 self.writer.add_scalar('Loss/value', value_loss.item(), self.global_step)
                 self.writer.add_scalar('Loss/entropy', entropy_loss.item(), self.global_step)
                 self.writer.add_scalar('Loss/total', loss.item(), self.global_step)
-                # Log return statistics for monitoring (Bug #3 related)
-                self.writer.add_scalar('Stats/return_mean', self.return_rms.mean, self.global_step)
-                self.writer.add_scalar('Stats/return_std', torch.sqrt(torch.tensor(self.return_rms.var)).item(), self.global_step)
+                # Log return statistics for monitoring
+                self.writer.add_scalar('Stats/return_mean', returns_flat.mean().item(), self.global_step)
+                self.writer.add_scalar('Stats/return_std', returns_flat.std().item(), self.global_step)
 
         self.global_step += 1
 

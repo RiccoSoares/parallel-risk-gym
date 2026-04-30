@@ -94,24 +94,36 @@ class ActionDecoder:
             for graph_idx in range(batch_size):
                 # Get nodes belonging to this graph
                 node_mask = (batch == graph_idx)
-                graph_source_scores = source_scores[node_mask].clone()  # [n_territories_i]
-                graph_dest_scores = dest_scores[node_mask].clone()      # [n_territories_i]
-                graph_troops_logits = troops_logits[graph_idx].clone()  # [max_troops]
+                graph_source_scores = source_scores[node_mask]  # [n_territories_i] - no clone
+                graph_dest_scores = dest_scores[node_mask]      # [n_territories_i] - no clone
+                graph_troops_logits = troops_logits[graph_idx]  # [max_troops] - no clone
 
                 n_territories = graph_source_scores.size(0)
 
-                # Apply action masking if enabled
+                # Apply action masking if enabled (avoid in-place ops for gradient stability)
                 if self.mask_source and observations is not None:
                     source_mask = self._compute_source_mask(observations[graph_idx])
-                    graph_source_scores[~source_mask] = -1e10
+                    graph_source_scores = torch.where(
+                        source_mask,
+                        graph_source_scores,
+                        torch.tensor(-1e10, device=graph_source_scores.device, dtype=graph_source_scores.dtype)
+                    )
 
                 if self.mask_dest and observations is not None:
                     dest_mask = self._compute_dest_mask(observations[graph_idx])
-                    graph_dest_scores[~dest_mask] = -1e10
+                    graph_dest_scores = torch.where(
+                        dest_mask,
+                        graph_dest_scores,
+                        torch.tensor(-1e10, device=graph_dest_scores.device, dtype=graph_dest_scores.dtype)
+                    )
 
                 if self.mask_troops and observations is not None:
                     troops_mask = self._compute_troops_mask(observations[graph_idx])
-                    graph_troops_logits[~troops_mask] = -1e10
+                    graph_troops_logits = torch.where(
+                        troops_mask,
+                        graph_troops_logits,
+                        torch.tensor(-1e10, device=graph_troops_logits.device, dtype=graph_troops_logits.dtype)
+                    )
 
                 # Sample source territory
                 if deterministic:
