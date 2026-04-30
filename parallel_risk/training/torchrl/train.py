@@ -247,19 +247,24 @@ class PPOTrainer:
 
             # Check if episode ended
             done = terminateds.get('__all__', False) or truncateds.get('__all__', False)
+            is_truncated = truncateds.get('__all__', False)
+            is_terminated = terminateds.get('__all__', False)
 
             # Store experience (before checking done, so we have consistent batch sizes)
             # Only include actual agent keys, not '__all__'
             agent_keys = [k for k in sorted(rewards.keys()) if k != '__all__']
 
-            # Bug #2 Fix: Compute next_value BEFORE episode reset
-            # For terminal states, next_value should be 0
-            # For non-terminal states, next_value is V(s_{t+1})
-            if done:
-                # Terminal state: bootstrap value is 0
+            # Compute next_value for GAE bootstrapping
+            # Key distinction:
+            #   - Terminated: game naturally ended (victory/elimination) -> bootstrap with 0
+            #   - Truncated: game artificially cut off (turn limit) -> bootstrap with V(s')
+            # This is critical for learning: truncation means the game WOULD continue,
+            # so the value estimate should account for potential future rewards.
+            if is_terminated:
+                # True termination (victory/elimination): no future value
                 next_value = torch.zeros(len(agent_keys), device=self.device)
             else:
-                # Non-terminal: compute value of next state
+                # Non-terminal OR truncated: compute value of next state for bootstrapping
                 next_graphs = [next_obs[agent] for agent in sorted(next_obs.keys())]
                 next_batched_graph = Batch.from_data_list(next_graphs)
                 with torch.no_grad():
@@ -271,9 +276,11 @@ class PPOTrainer:
             rollout['rewards'].append(torch.tensor([rewards[agent] for agent in agent_keys], device=self.device))
             rollout['values'].append(values.squeeze(-1))  # [batch_size]
             rollout['log_probs'].append(log_probs)  # [batch_size, action_budget]
-            rollout['dones'].append(torch.tensor([terminateds[agent] for agent in agent_keys], dtype=torch.bool, device=self.device))
+            # Store episode boundaries (both terminated AND truncated) for GAE propagation masking
+            # GAE should not propagate across episode boundaries regardless of termination type
+            rollout['dones'].append(torch.tensor([done for _ in agent_keys], dtype=torch.bool, device=self.device))
             rollout['batches'].append(batched_graph.batch)
-            rollout['next_values'].append(next_value)  # Bug #2 fix: store next_value per timestep
+            rollout['next_values'].append(next_value)  # Stores V(s') for truncated, 0 for terminated
 
             steps_collected += 1
 
@@ -296,15 +303,19 @@ class PPOTrainer:
         """
         Compute Generalized Advantage Estimation (GAE).
 
-        Bug #2 Fix: Now uses per-timestep next_values that correctly handle
-        episode boundaries. Terminal states have next_value=0, non-terminal
-        states have the actual V(s_{t+1}).
+        Properly handles termination vs truncation semantics:
+        - Terminated (victory/elimination): next_value=0, GAE stops
+        - Truncated (turn limit): next_value=V(s'), GAE stops but bootstraps with value
+        - Non-terminal: next_value=V(s'), GAE propagates
+
+        The key distinction is that truncated episodes still have continuation value
+        (the game WOULD continue), so we bootstrap with V(s') rather than 0.
 
         Args:
             rewards: List of reward tensors [batch_size]
             values: List of value tensors [batch_size]
-            dones: List of done flags [batch_size]
-            next_values: List of next state values [batch_size] (per-timestep)
+            dones: List of episode boundary flags [batch_size] (True if episode ended)
+            next_values: List of next state values [batch_size] (0 for terminated, V(s') for truncated/non-terminal)
 
         Returns:
             advantages: Tensor of advantages
@@ -326,19 +337,22 @@ class PPOTrainer:
 
         # Reverse iteration through trajectory
         for t in reversed(range(len(rewards))):
-            # Bug #2 Fix: Use per-timestep next_values which already have
-            # next_value=0 for terminal states (computed during collection)
+            # next_val is:
+            #   - 0 for terminated states (victory/elimination)
+            #   - V(s') for truncated states (turn limit) - allows bootstrapping!
+            #   - V(s') for non-terminal states
             next_val = next_values[t]
 
-            # Mask for GAE propagation (not for next_value, which is already correct)
+            # Mask for GAE propagation - don't propagate across episode boundaries
+            # (applies to both terminated and truncated episodes)
             mask = 1.0 - dones[t].float()
 
             # TD error: δ_t = r_t + γ * V(s_{t+1}) - V(s_t)
-            # Note: next_val is already 0 for terminal states
+            # For truncated episodes, next_val = V(s') allows proper bootstrapping
             delta = rewards[t] + self.gamma * next_val - values[t]
 
             # GAE: A_t = δ_t + (γλ) * A_{t+1}
-            # Only propagate GAE from future if not terminal
+            # Only propagate GAE from future steps if not at episode boundary
             gae = delta + self.gamma * self.gae_lambda * mask * gae
 
             advantages.insert(0, gae.clone())
