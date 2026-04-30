@@ -2,7 +2,7 @@
 
 env:
   map_name: "simple_6"
-  max_turns: 100
+  max_turns: 50  # Reduced from 100 to force aggressive play
   action_budget: 5
   seed: null  # Set to integer for reproducibility
   use_reward_shaping: true  # Enable dense reward shaping (conquest, territory control, etc.)
