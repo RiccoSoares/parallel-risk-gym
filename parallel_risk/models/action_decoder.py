@@ -147,7 +147,10 @@ class ActionDecoder:
                     troops_idx = troops_dist.sample()
 
                 # Combine into action
-                action = torch.tensor([source_idx, dest_idx, troops_idx], device=device)
+                # FIX: Use torch.stack() instead of torch.tensor() to preserve gradient connections
+                # torch.tensor() creates a new tensor disconnected from the computation graph,
+                # causing the sampled indices to lose their gradient connection (critical for PPO)
+                action = torch.stack([source_idx, dest_idx, troops_idx])
                 batch_actions.append(action)
 
                 # Compute log probability if requested

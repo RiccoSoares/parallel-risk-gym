@@ -83,6 +83,10 @@ class GCNPolicy(nn.Module):
         # Global features processing
         self.global_proj = nn.Linear(global_features_dim, hidden_dim)
 
+        # FIX: Add LayerNorm before value head to normalize the concatenated inputs
+        # (graph_embedding and global_emb may have very different magnitudes)
+        self.value_input_norm = nn.LayerNorm(hidden_dim * 2)
+
         # Value head (critic)
         # Takes graph-level embedding (global pooled nodes + global features)
         self.value_head = nn.Sequential(
@@ -159,9 +163,10 @@ class GCNPolicy(nn.Module):
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
 
-            # Residual connection (skip connection)
-            if i > 0:  # Skip first layer residual for dimensionality matching
-                x = x + x_residual
+            # Residual connection (skip connection) for ALL layers
+            # FIX: Previously only applied for i > 0, but ALL layers have hidden_dim -> hidden_dim,
+            # so dimensionality always matches. Skipping the first layer caused vanishing gradients.
+            x = x + x_residual
 
         node_embeddings = x  # [num_nodes, hidden_dim]
 
@@ -192,6 +197,8 @@ class GCNPolicy(nn.Module):
 
         # Concatenate graph embedding and global features for value
         value_input = torch.cat([graph_embedding, global_emb], dim=-1)  # [batch_size, hidden_dim * 2]
+        # FIX: Apply LayerNorm to normalize concatenated inputs before value head
+        value_input = self.value_input_norm(value_input)
         value = self.value_head(value_input)  # [batch_size, 1]
 
         # Generate action logits for each action in the budget

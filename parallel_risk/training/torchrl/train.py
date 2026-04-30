@@ -195,7 +195,7 @@ class PPOTrainer:
             'log_probs': [],
             'dones': [],
             'batches': [],  # Batch indices for graph data
-            'next_obs': None,  # Next observation for GAE bootstrapping (Bug #2 fix)
+            'next_values': [],  # Next state values for GAE (Bug #2 fix: store per-timestep)
         }
 
         # Reset environment
@@ -252,6 +252,20 @@ class PPOTrainer:
             # Only include actual agent keys, not '__all__'
             agent_keys = [k for k in sorted(rewards.keys()) if k != '__all__']
 
+            # Bug #2 Fix: Compute next_value BEFORE episode reset
+            # For terminal states, next_value should be 0
+            # For non-terminal states, next_value is V(s_{t+1})
+            if done:
+                # Terminal state: bootstrap value is 0
+                next_value = torch.zeros(len(agent_keys), device=self.device)
+            else:
+                # Non-terminal: compute value of next state
+                next_graphs = [next_obs[agent] for agent in sorted(next_obs.keys())]
+                next_batched_graph = Batch.from_data_list(next_graphs)
+                with torch.no_grad():
+                    _, next_value, _ = self.policy(next_batched_graph)
+                    next_value = next_value.squeeze(-1)  # [batch_size]
+
             rollout['observations'].append(batched_graph)
             rollout['actions'].append(actions_tensor)
             rollout['rewards'].append(torch.tensor([rewards[agent] for agent in agent_keys], device=self.device))
@@ -259,6 +273,7 @@ class PPOTrainer:
             rollout['log_probs'].append(log_probs)  # [batch_size, action_budget]
             rollout['dones'].append(torch.tensor([terminateds[agent] for agent in agent_keys], dtype=torch.bool, device=self.device))
             rollout['batches'].append(batched_graph.batch)
+            rollout['next_values'].append(next_value)  # Bug #2 fix: store next_value per timestep
 
             steps_collected += 1
 
@@ -275,26 +290,21 @@ class PPOTrainer:
             else:
                 obs = next_obs
 
-        # Store final observation for GAE bootstrapping (Bug #2 fix)
-        # If episode ended, obs is already the new episode start state
-        # Otherwise, obs is the next state we would have stepped from
-        if len(obs) > 0:
-            graphs = [obs[agent] for agent in sorted(obs.keys())]
-            rollout['next_obs'] = Batch.from_data_list(graphs)
-
         return rollout
 
-    def compute_gae(self, rewards, values, dones, next_obs=None):
+    def compute_gae(self, rewards, values, dones, next_values):
         """
         Compute Generalized Advantage Estimation (GAE).
 
-        Bug #2 Fix: Now properly bootstraps from next state value for non-terminal states.
+        Bug #2 Fix: Now uses per-timestep next_values that correctly handle
+        episode boundaries. Terminal states have next_value=0, non-terminal
+        states have the actual V(s_{t+1}).
 
         Args:
             rewards: List of reward tensors [batch_size]
             values: List of value tensors [batch_size]
             dones: List of done flags [batch_size]
-            next_obs: Next observation for bootstrapping (optional)
+            next_values: List of next state values [batch_size] (per-timestep)
 
         Returns:
             advantages: Tensor of advantages
@@ -314,30 +324,25 @@ class PPOTrainer:
 
         gae = torch.zeros(batch_size, device=self.device)
 
-        # Bootstrap from next state value for non-terminal states (Bug #2 fix)
-        if next_obs is not None:
-            with torch.no_grad():
-                _, next_value, _ = self.policy(next_obs)
-                next_value = next_value.squeeze(-1)  # [batch_size]
-        else:
-            next_value = torch.zeros(batch_size, device=self.device)
-
         # Reverse iteration through trajectory
         for t in reversed(range(len(rewards))):
-            # Mask out value for terminal states
+            # Bug #2 Fix: Use per-timestep next_values which already have
+            # next_value=0 for terminal states (computed during collection)
+            next_val = next_values[t]
+
+            # Mask for GAE propagation (not for next_value, which is already correct)
             mask = 1.0 - dones[t].float()
 
             # TD error: δ_t = r_t + γ * V(s_{t+1}) - V(s_t)
-            delta = rewards[t] + self.gamma * next_value * mask - values[t]
+            # Note: next_val is already 0 for terminal states
+            delta = rewards[t] + self.gamma * next_val - values[t]
 
             # GAE: A_t = δ_t + (γλ) * A_{t+1}
+            # Only propagate GAE from future if not terminal
             gae = delta + self.gamma * self.gae_lambda * mask * gae
 
             advantages.insert(0, gae.clone())
             returns.insert(0, gae + values[t])
-
-            # Update next_value for previous timestep
-            next_value = values[t]
 
         advantages = torch.stack(advantages)
         returns = torch.stack(returns)
@@ -351,16 +356,19 @@ class PPOTrainer:
         Args:
             rollout: Collected experience
         """
-        # Compute advantages with proper bootstrapping (Bug #2 fix)
+        # Compute advantages with proper per-timestep bootstrapping (Bug #2 fix)
         advantages, returns = self.compute_gae(
             rollout['rewards'],
             rollout['values'],
             rollout['dones'],
-            rollout['next_obs']  # Pass next observation for bootstrapping
+            rollout['next_values']  # Bug #2 fix: pass per-timestep next_values
         )
 
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # Bug #1 Fix: Do NOT normalize advantages
+        # Previously advantages were normalized but returns were not, creating
+        # a scale mismatch that caused catastrophic forgetting.
+        # Both are now unnormalized for consistency.
+        # (The original normalization line was: advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8))
 
         # Flatten returns for value loss
         # REMOVED: Value normalization - was causing catastrophic forgetting
@@ -375,6 +383,7 @@ class PPOTrainer:
         advantages_per_timestep = [advantages[t] for t in range(T)]  # List of [B] tensors
         old_log_probs_per_timestep = [rollout['log_probs'][t].sum(dim=1).detach() for t in range(T)]  # List of [B] tensors
         returns_per_timestep = [returns[t] for t in range(T)]  # List of [B] tensors
+        old_values_per_timestep = [rollout['values'][t].detach() for t in range(T)]  # Bug #3 fix: store old values for clipping
 
         # Multiple epochs of SGD with shuffled timesteps
         # Shuffling reduces overfitting to temporal ordering in small batches
@@ -389,6 +398,7 @@ class PPOTrainer:
             all_advantages = []
             all_old_log_probs = []
             all_returns = []
+            all_old_values = []  # Bug #3 fix: track old values
 
             for idx in timestep_indices:
                 t = idx.item()
@@ -415,6 +425,7 @@ class PPOTrainer:
                 all_advantages.append(advantages_per_timestep[t])
                 all_old_log_probs.append(old_log_probs_per_timestep[t])
                 all_returns.append(returns_per_timestep[t])
+                all_old_values.append(old_values_per_timestep[t])  # Bug #3 fix
 
             new_log_probs_flat = torch.cat(all_new_log_probs)
             new_values_flat = torch.cat(all_new_values)
@@ -422,6 +433,7 @@ class PPOTrainer:
             advantages_flat = torch.cat(all_advantages)
             old_log_probs_flat = torch.cat(all_old_log_probs)
             returns_flat = torch.cat(all_returns)
+            old_values_flat = torch.cat(all_old_values)  # Bug #3 fix
 
             # PPO policy loss
             ratio = torch.exp(new_log_probs_flat - old_log_probs_flat)
@@ -429,10 +441,15 @@ class PPOTrainer:
             surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages_flat
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            # Value loss - using unnormalized returns
-            # (Fixed catastrophic forgetting bug: was training on normalized targets
-            #  but value network outputs unnormalized predictions)
-            value_loss = nn.functional.mse_loss(new_values_flat, returns_flat)
+            # Bug #3 Fix: Value function clipping
+            # Clip value predictions to be within epsilon of old values
+            # This prevents large value function updates that cause catastrophic forgetting
+            value_pred_clipped = old_values_flat + torch.clamp(
+                new_values_flat - old_values_flat, -self.clip_epsilon, self.clip_epsilon
+            )
+            value_loss_unclipped = (new_values_flat - returns_flat) ** 2
+            value_loss_clipped = (value_pred_clipped - returns_flat) ** 2
+            value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
 
             # Entropy bonus
             entropy_loss = -entropies_flat.mean()
@@ -455,6 +472,9 @@ class PPOTrainer:
                 # Log return statistics for monitoring
                 self.writer.add_scalar('Stats/return_mean', returns_flat.mean().item(), self.global_step)
                 self.writer.add_scalar('Stats/return_std', returns_flat.std().item(), self.global_step)
+                # Log value clipping statistics
+                clip_fraction = (torch.abs(new_values_flat - old_values_flat) > self.clip_epsilon).float().mean()
+                self.writer.add_scalar('Stats/value_clip_fraction', clip_fraction.item(), self.global_step)
 
         self.global_step += 1
 
