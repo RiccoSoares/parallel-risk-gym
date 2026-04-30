@@ -236,10 +236,14 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
 
         # Check turn limit - TRUNCATION (not termination!)
         # The game is artificially cut off, not naturally ended
+        # Rewards are asymmetric to discourage defensive strategies:
+        # - Winner gets small reward (+0.2) - better than losing but worse than decisive victory
+        # - Loser gets large penalty (-0.8) - almost as bad as elimination
+        # - Expected value is negative (-0.3 average) - both agents should prefer decisive endings
         if self.game_state['turn_number'] >= self.max_turns:
             truncations = {a: True for a in self.possible_agents}
             winner = max(territory_counts, key=territory_counts.get)
-            rewards = {a: (0.5 if a == winner else -0.5) for a in self.possible_agents}
+            rewards = {a: (0.2 if a == winner else -0.8) for a in self.possible_agents}
             return no_termination, truncations, rewards
 
         # Game continues
@@ -247,6 +251,10 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
 
     def step(self, actions):
         """Process one turn of parallel actions"""
+        # Capture pre-step state for reward shaping (conquest detection)
+        if self.reward_shaper is not None:
+            self.reward_shaper.begin_step(self.game_state)
+
         # Calculate income for each agent based on region control
         for agent in self.agents:
             self.game_state['available_income'][agent] = self._calculate_income(agent)
