@@ -25,11 +25,11 @@ class RewardShapingConfig:
     Recommended starting values provided as defaults.
     """
     # Enable/disable individual components
-    enable_territory_control: bool = True
+    enable_territory_control: bool = False    # Disabled - encourages passive survival
     enable_region_completion: bool = True
-    enable_troop_advantage: bool = True
-    enable_strategic_position: bool = True
-    enable_territory_conquest: bool = True     # Immediate reward for capturing territories
+    enable_troop_advantage: bool = False      # Disabled - encourages passive survival
+    enable_strategic_position: bool = False   # Disabled - encourages passive survival
+    enable_territory_conquest: bool = True    # Immediate reward for capturing territories
 
     # Coefficient for each reward component
     # These scale the shaped rewards relative to terminal +1/-1
