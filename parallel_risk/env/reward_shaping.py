@@ -30,6 +30,7 @@ class RewardShapingConfig:
     enable_troop_advantage: bool = False      # Disabled - encourages passive survival
     enable_strategic_position: bool = False   # Disabled - encourages passive survival
     enable_territory_conquest: bool = True    # Immediate reward for capturing territories
+    enable_territory_loss: bool = True        # Penalty for losing territories
 
     # Coefficient for each reward component
     # These scale the shaped rewards relative to terminal +1/-1
@@ -38,6 +39,7 @@ class RewardShapingConfig:
     troop_advantage_weight: float = 0.01        # Per-step reward for troop ratio
     strategic_position_weight: float = 0.005    # Per-step reward for connectivity
     territory_conquest_weight: float = 0.1      # Immediate reward per territory captured
+    territory_loss_weight: float = 0.08         # Penalty per territory lost
 
     # Terminal reward scale (default 1.0 = unchanged)
     terminal_reward_scale: float = 1.0
@@ -172,6 +174,13 @@ class RewardShaper:
                 )
                 rewards[agent] += self.config.territory_conquest_weight * conquest_reward
 
+            # 6. Territory loss penalty (immediate penalty for losing territories)
+            if self.config.enable_territory_loss:
+                loss_penalty = self._compute_territory_loss_penalty(
+                    game_state, agent_idx
+                )
+                rewards[agent] -= self.config.territory_loss_weight * loss_penalty
+
         # Update previous ownership tracking for next step
         self._previous_territory_ownership = game_state['territory_ownership'].copy()
 
@@ -301,6 +310,33 @@ class RewardShaper:
 
         return float(newly_captured)
 
+    def _compute_territory_loss_penalty(
+        self,
+        game_state: Dict,
+        agent_idx: int
+    ) -> float:
+        """Penalty for losing territories to enemies.
+
+        Returns the number of territories lost this step.
+        This creates strong disincentive for passive play that allows captures.
+
+        Note: Requires begin_step() to be called before actions are executed.
+        """
+        if not hasattr(self, '_pre_step_ownership') or self._pre_step_ownership is None:
+            # First step or begin_step not called - no loss detection possible
+            return 0.0
+
+        current_ownership = game_state['territory_ownership']
+        previous_ownership = self._pre_step_ownership
+
+        # Count territories that changed from this agent to enemy
+        # (was owned by agent, now is not owned by agent)
+        was_mine = previous_ownership == agent_idx
+        is_not_mine_now = current_ownership != agent_idx
+        territories_lost = np.sum(was_mine & is_not_mine_now)
+
+        return float(territories_lost)
+
     def scale_terminal_rewards(self, base_rewards: Dict[str, float]) -> Dict[str, float]:
         """Scale terminal rewards (+1/-1) by configured factor.
 
@@ -355,6 +391,11 @@ class RewardShaper:
                 info[agent]['territory_conquest'] = self._compute_territory_conquest_reward(
                     game_state, agent_idx
                 ) * self.config.territory_conquest_weight
+
+            if self.config.enable_territory_loss:
+                info[agent]['territory_loss'] = -self._compute_territory_loss_penalty(
+                    game_state, agent_idx
+                ) * self.config.territory_loss_weight
 
             info[agent]['total_shaped'] = sum(info[agent].values())
 
@@ -411,6 +452,7 @@ def create_conquest_config() -> RewardShapingConfig:
     """Focus on territory conquest - immediate reward for capturing territories.
 
     Designed to encourage aggressive play and discourage defensive strategies.
+    Includes territory loss penalty to punish being attacked successfully.
     """
     return RewardShapingConfig(
         enable_territory_control=False,
@@ -418,6 +460,8 @@ def create_conquest_config() -> RewardShapingConfig:
         enable_troop_advantage=False,
         enable_strategic_position=False,
         enable_territory_conquest=True,
+        enable_territory_loss=True,
         region_completion_weight=0.15,
         territory_conquest_weight=0.1,
+        territory_loss_weight=0.08,
     )

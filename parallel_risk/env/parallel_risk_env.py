@@ -235,15 +235,13 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
                 return terminations, no_truncation, rewards
 
         # Check turn limit - TRUNCATION (not termination!)
-        # The game is artificially cut off, not naturally ended
-        # Rewards are asymmetric to discourage defensive strategies:
-        # - Winner gets small reward (+0.2) - better than losing but worse than decisive victory
-        # - Loser gets large penalty (-0.8) - almost as bad as elimination
-        # - Expected value is negative (-0.3 average) - both agents should prefer decisive endings
+        # Neutral rewards (0, 0) - incentives come from shaped rewards during gameplay:
+        # - Territory conquest (+0.1) rewards attacking
+        # - Territory loss (-0.08) punishes being captured
+        # - This avoids perverse incentives where agents play defensively to avoid turn limit penalties
         if self.game_state['turn_number'] >= self.max_turns:
             truncations = {a: True for a in self.possible_agents}
-            winner = max(territory_counts, key=territory_counts.get)
-            rewards = {a: (0.2 if a == winner else -0.8) for a in self.possible_agents}
+            rewards = {a: 0.0 for a in self.possible_agents}
             return no_termination, truncations, rewards
 
         # Game continues
