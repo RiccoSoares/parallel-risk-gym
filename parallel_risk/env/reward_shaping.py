@@ -39,7 +39,7 @@ class RewardShapingConfig:
     troop_advantage_weight: float = 0.01        # Per-step reward for troop ratio
     strategic_position_weight: float = 0.005    # Per-step reward for connectivity
     territory_conquest_weight: float = 0.1      # Immediate reward per territory captured
-    territory_loss_weight: float = 0.08         # Penalty per territory lost
+    territory_loss_weight: float = 0.1          # Penalty per territory lost (symmetric with conquest)
 
     # Terminal reward scale (default 1.0 = unchanged)
     terminal_reward_scale: float = 1.0
@@ -463,5 +463,5 @@ def create_conquest_config() -> RewardShapingConfig:
         enable_territory_loss=True,
         region_completion_weight=0.15,
         territory_conquest_weight=0.1,
-        territory_loss_weight=0.08,
+        territory_loss_weight=0.1,
     )

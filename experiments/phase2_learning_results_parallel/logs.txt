@@ -1,0 +1,237 @@
+I564936@LG3F0G56DP parallel-risk-gym % PYTHONPATH=. python experiments/validate_gnn_learning.py \
+    --num-iterations 100 \
+    --eval-interval 10 \
+    --num-eval-episodes 100 \
+    --output-dir experiments/phase2_learning_results_parallel \
+    --parallel \
+    --num-workers 8
+
+======================================================================
+PHASE 2: GNN LEARNING VALIDATION EXPERIMENT
+======================================================================
+
+Configuration:
+  Training iterations:  100
+  Eval interval:        10
+  Eval episodes:        100
+  Config file:          parallel_risk/training/torchrl/configs/gnn_gcn.yaml
+  Checkpoint dir:       checkpoints/gnn_validation
+  Results dir:          experiments/phase2_learning_results_parallel
+  Architecture:         GNN (GCN) + PPO
+  Map:                  simple_6
+  Training mode:        Parallel (8 workers)
+
+======================================================================
+STEP 1: Training GNN+PPO Agent
+======================================================================
+Training for 100 iterations
+Checkpoints will be saved to: checkpoints/gnn_validation
+Using parallel training with 8 workers
+This will take approximately 30-60 minutes...
+
+Starting parallel training for 100 iterations...
+Device: cpu
+Workers: 8
+Map: simple_6
+Policy: GCN (128x3)
+
+Iteration 1/100 | Reward: 0.405 | Length: 43.2 | Episodes: 44
+Iteration 2/100 | Reward: 0.535 | Length: 46.1 | Episodes: 86
+Iteration 3/100 | Reward: 0.530 | Length: 41.6 | Episodes: 130
+Iteration 4/100 | Reward: 0.515 | Length: 46.6 | Episodes: 173
+Iteration 5/100 | Reward: 0.565 | Length: 46.5 | Episodes: 215
+Iteration 6/100 | Reward: 0.560 | Length: 48.0 | Episodes: 256
+Iteration 7/100 | Reward: 0.545 | Length: 44.2 | Episodes: 297
+Iteration 8/100 | Reward: 0.475 | Length: 44.6 | Episodes: 340
+Iteration 9/100 | Reward: 0.410 | Length: 46.0 | Episodes: 382
+Iteration 10/100 | Reward: 0.550 | Length: 46.8 | Episodes: 423
+  💾 Saved checkpoint: checkpoints/gnn_validation/checkpoint_000010.pt
+Iteration 11/100 | Reward: 0.490 | Length: 43.3 | Episodes: 465
+Iteration 12/100 | Reward: 0.470 | Length: 47.0 | Episodes: 506
+Iteration 13/100 | Reward: 0.370 | Length: 46.1 | Episodes: 548
+Iteration 14/100 | Reward: 0.410 | Length: 47.0 | Episodes: 589
+Iteration 15/100 | Reward: 0.460 | Length: 48.1 | Episodes: 629
+Iteration 16/100 | Reward: 0.365 | Length: 47.9 | Episodes: 669
+Iteration 17/100 | Reward: 0.390 | Length: 44.0 | Episodes: 710
+Iteration 18/100 | Reward: 0.445 | Length: 44.0 | Episodes: 752
+Iteration 19/100 | Reward: 0.445 | Length: 46.1 | Episodes: 794
+Iteration 20/100 | Reward: 0.415 | Length: 46.6 | Episodes: 837
+  💾 Saved checkpoint: checkpoints/gnn_validation/checkpoint_000020.pt
+Iteration 21/100 | Reward: 0.435 | Length: 49.0 | Episodes: 877
+Iteration 22/100 | Reward: 0.390 | Length: 46.8 | Episodes: 918
+Iteration 23/100 | Reward: 0.450 | Length: 48.6 | Episodes: 958
+Iteration 24/100 | Reward: 0.420 | Length: 48.1 | Episodes: 998
+ç´pIteration 25/100 | Reward: 0.445 | Length: 46.5 | Episodes: 1040
+Iteration 26/100 | Reward: 0.440 | Length: 49.4 | Episodes: 1081
+Iteration 27/100 | Reward: 0.400 | Length: 50.0 | Episodes: 1121
+Iteration 28/100 | Reward: 0.475 | Length: 48.1 | Episodes: 1162
+Iteration 29/100 | Reward: 0.455 | Length: 49.4 | Episodes: 1202
+Iteration 30/100 | Reward: 0.435 | Length: 47.4 | Episodes: 1243
+  💾 Saved checkpoint: checkpoints/gnn_validation/checkpoint_000030.pt
+Iteration 31/100 | Reward: 0.465 | Length: 44.5 | Episodes: 1284
+Iteration 32/100 | Reward: 0.510 | Length: 44.9 | Episodes: 1326
+Iteration 33/100 | Reward: 0.500 | Length: 47.0 | Episodes: 1366
+Iteration 34/100 | Reward: 0.500 | Length: 46.5 | Episodes: 1408
+Iteration 35/100 | Reward: 0.475 | Length: 46.3 | Episodes: 1449
+Iteration 36/100 | Reward: 0.515 | Length: 49.9 | Episodes: 1489
+Iteration 37/100 | Reward: 0.505 | Length: 47.1 | Episodes: 1530
+Iteration 38/100 | Reward: 0.420 | Length: 50.0 | Episodes: 1571
+Iteration 39/100 | Reward: 0.500 | Length: 49.2 | Episodes: 1611
+Iteration 40/100 | Reward: 0.580 | Length: 44.9 | Episodes: 1653
+  💾 Saved checkpoint: checkpoints/gnn_validation/checkpoint_000040.pt
+Iteration 41/100 | Reward: 0.555 | Length: 47.8 | Episodes: 1694
+Iteration 42/100 | Reward: 0.635 | Length: 49.2 | Episodes: 1734
+Iteration 43/100 | Reward: 0.535 | Length: 50.0 | Episodes: 1774
+Iteration 44/100 | Reward: 0.535 | Length: 49.0 | Episodes: 1816
+Iteration 45/100 | Reward: 0.560 | Length: 50.0 | Episodes: 1856
+Iteration 46/100 | Reward: 0.490 | Length: 45.9 | Episodes: 1897
+Iteration 47/100 | Reward: 0.630 | Length: 48.9 | Episodes: 1938
+Iteration 48/100 | Reward: 0.555 | Length: 46.4 | Episodes: 1979
+Iteration 49/100 | Reward: 0.570 | Length: 49.6 | Episodes: 2020
+Iteration 50/100 | Reward: 0.625 | Length: 48.2 | Episodes: 2060
+  💾 Saved checkpoint: checkpoints/gnn_validation/checkpoint_000050.pt
+Iteration 51/100 | Reward: 0.510 | Length: 47.6 | Episodes: 2100
+Iteration 52/100 | Reward: 0.600 | Length: 50.0 | Episodes: 2140
+Iteration 53/100 | Reward: 0.565 | Length: 49.4 | Episodes: 2180
+hoIteration 54/100 | Reward: 0.615 | Length: 47.4 | Episodes: 2220
+Iteration 55/100 | Reward: 0.540 | Length: 49.2 | Episodes: 2260
+Iteration 56/100 | Reward: 0.535 | Length: 47.9 | Episodes: 2301
+Iteration 57/100 | Reward: 0.555 | Length: 47.4 | Episodes: 2342
+Iteration 58/100 | Reward: 0.565 | Length: 49.0 | Episodes: 2382
+Iteration 59/100 | Reward: 0.590 | Length: 49.6 | Episodes: 2422
+Iteration 60/100 | Reward: 0.620 | Length: 50.0 | Episodes: 2462
+  💾 Saved checkpoint: checkpoints/gnn_validation/checkpoint_000060.pt
+Iteration 61/100 | Reward: 0.600 | Length: 48.9 | Episodes: 2502
+Iteration 62/100 | Reward: 0.665 | Length: 48.2 | Episodes: 2542
+Iteration 63/100 | Reward: 0.595 | Length: 48.8 | Episodes: 2582
+Iteration 64/100 | Reward: 0.605 | Length: 48.1 | Episodes: 2623
+Iteration 65/100 | Reward: 0.630 | Length: 50.0 | Episodes: 2663
+Iteration 66/100 | Reward: 0.660 | Length: 49.6 | Episodes: 2703
+Iteration 67/100 | Reward: 0.640 | Length: 50.0 | Episodes: 2743
+Iteration 68/100 | Reward: 0.630 | Length: 49.8 | Episodes: 2783
+Iteration 69/100 | Reward: 0.600 | Length: 50.0 | Episodes: 2823
+Iteration 70/100 | Reward: 0.720 | Length: 45.9 | Episodes: 2863
+  💾 Saved checkpoint: checkpoints/gnn_validation/checkpoint_000070.pt
+Iteration 71/100 | Reward: 0.555 | Length: 50.0 | Episodes: 2903
+Iteration 72/100 | Reward: 0.730 | Length: 49.0 | Episodes: 2944
+Iteration 73/100 | Reward: 0.700 | Length: 47.6 | Episodes: 2985
+Iteration 74/100 | Reward: 0.610 | Length: 47.3 | Episodes: 3027
+Iteration 75/100 | Reward: 0.750 | Length: 49.9 | Episodes: 3068
+Iteration 76/100 | Reward: 0.630 | Length: 49.6 | Episodes: 3108
+Iteration 77/100 | Reward: 0.660 | Length: 48.6 | Episodes: 3149
+Iteration 78/100 | Reward: 0.695 | Length: 47.9 | Episodes: 3189
+Iteration 79/100 | Reward: 0.670 | Length: 50.0 | Episodes: 3229
+Iteration 80/100 | Reward: 0.760 | Length: 50.0 | Episodes: 3269
+  💾 Saved checkpoint: checkpoints/gnn_validation/checkpoint_000080.pt
+Iteration 81/100 | Reward: 0.585 | Length: 50.0 | Episodes: 3309
+Iteration 82/100 | Reward: 0.685 | Length: 48.4 | Episodes: 3349
+Iteration 83/100 | Reward: 0.720 | Length: 50.0 | Episodes: 3389
+Iteration 84/100 | Reward: 0.715 | Length: 45.9 | Episodes: 3430
+Iteration 85/100 | Reward: 0.600 | Length: 50.0 | Episodes: 3470
+Iteration 86/100 | Reward: 0.675 | Length: 48.0 | Episodes: 3510
+Iteration 87/100 | Reward: 0.685 | Length: 50.0 | Episodes: 3550
+Iteration 88/100 | Reward: 0.660 | Length: 49.4 | Episodes: 3590
+Iteration 89/100 | Reward: 0.650 | Length: 50.0 | Episodes: 3630
+Iteration 90/100 | Reward: 0.620 | Length: 50.0 | Episodes: 3670
+  💾 Saved checkpoint: checkpoints/gnn_validation/checkpoint_000090.pt
+Iteration 91/100 | Reward: 0.665 | Length: 50.0 | Episodes: 3710
+Iteration 92/100 | Reward: 0.685 | Length: 49.0 | Episodes: 3750
+Iteration 93/100 | Reward: 0.650 | Length: 49.0 | Episodes: 3790
+Iteration 94/100 | Reward: 0.545 | Length: 50.0 | Episodes: 3830
+Iteration 95/100 | Reward: 0.605 | Length: 50.0 | Episodes: 3870
+Iteration 96/100 | Reward: 0.625 | Length: 48.1 | Episodes: 3910
+Iteration 97/100 | Reward: 0.670 | Length: 50.0 | Episodes: 3950
+Iteration 98/100 | Reward: 0.595 | Length: 50.0 | Episodes: 3990
+Iteration 99/100 | Reward: 0.755 | Length: 48.6 | Episodes: 4030
+Iteration 100/100 | Reward: 0.645 | Length: 50.0 | Episodes: 4070
+  💾 Saved checkpoint: checkpoints/gnn_validation/checkpoint_000100.pt
+
+✅ Training complete!
+
+✓ Training completed successfully
+
+======================================================================
+STEP 2: Evaluating Checkpoints
+======================================================================
+Found 20 checkpoints
+Will evaluate 20 checkpoints (every 10 iterations)
+
+  Evaluating checkpoint at iteration 10...
+    Episode 20/100 - Win rate: 0.00%
+    Episode 40/100 - Win rate: 0.00%
+    Episode 60/100 - Win rate: 0.00%
+    Episode 80/100 - Win rate: 0.00%
+    Episode 100/100 - Win rate: 0.00%
+    Win rate: 0.00% | Avg length: 50.0
+
+  Evaluating checkpoint at iteration 20...
+    Episode 20/100 - Win rate: 0.00%
+    Episode 40/100 - Win rate: 0.00%
+    Episode 60/100 - Win rate: 0.00%
+    Episode 80/100 - Win rate: 0.00%
+    Episode 100/100 - Win rate: 0.00%
+    Win rate: 0.00% | Avg length: 50.0
+
+  Evaluating checkpoint at iteration 30...
+    Episode 20/100 - Win rate: 0.00%
+    Episode 40/100 - Win rate: 0.00%
+    Episode 60/100 - Win rate: 0.00%
+    Episode 80/100 - Win rate: 0.00%
+    Episode 100/100 - Win rate: 0.00%
+    Win rate: 0.00% | Avg length: 50.0
+
+  Evaluating checkpoint at iteration 40...
+    Episode 20/100 - Win rate: 80.00%
+    Episode 40/100 - Win rate: 75.00%
+    Episode 60/100 - Win rate: 66.67%
+    Episode 80/100 - Win rate: 63.75%
+    Episode 100/100 - Win rate: 66.00%
+    Win rate: 66.00% | Avg length: 26.2
+
+  Evaluating checkpoint at iteration 50...
+    Episode 20/100 - Win rate: 0.00%
+    Episode 40/100 - Win rate: 10.00%
+    Episode 60/100 - Win rate: 11.67%
+    Episode 80/100 - Win rate: 13.75%
+    Episode 100/100 - Win rate: 16.00%
+    Win rate: 16.00% | Avg length: 47.3
+
+  Evaluating checkpoint at iteration 60...
+    Episode 20/100 - Win rate: 0.00%
+    Episode 40/100 - Win rate: 0.00%
+    Episode 60/100 - Win rate: 0.00%
+    Episode 80/100 - Win rate: 0.00%
+    Episode 100/100 - Win rate: 0.00%
+    Win rate: 0.00% | Avg length: 50.0
+
+  Evaluating checkpoint at iteration 70...
+    Episode 20/100 - Win rate: 5.00%
+    Episode 40/100 - Win rate: 2.50%
+    Episode 60/100 - Win rate: 3.33%
+    Episode 80/100 - Win rate: 3.75%
+    Episode 100/100 - Win rate: 3.00%
+    Win rate: 3.00% | Avg length: 48.6
+
+  Evaluating checkpoint at iteration 80...
+    Episode 20/100 - Win rate: 35.00%
+    Episode 40/100 - Win rate: 30.00%
+    Episode 60/100 - Win rate: 26.67%
+    Episode 80/100 - Win rate: 25.00%
+    Episode 100/100 - Win rate: 24.00%
+    Win rate: 24.00% | Avg length: 40.9
+
+  Evaluating checkpoint at iteration 90...
+    Episode 20/100 - Win rate: 100.00%
+    Episode 40/100 - Win rate: 100.00%
+    Episode 60/100 - Win rate: 100.00%
+    Episode 80/100 - Win rate: 100.00%
+    Episode 100/100 - Win rate: 100.00%
+    Win rate: 100.00% | Avg length: 5.5
+
+  Evaluating checkpoint at iteration 100...
+    Episode 20/100 - Win rate: 85.00%
+    Episode 40/100 - Win rate: 77.50%
+    Episode 60/100 - Win rate: 81.67%
+    Episode 80/100 - Win rate: 83.75%
+    Episode 100/100 - Win rate: 83.00%
+    Win rate: 83.00% | Avg length: 30.6

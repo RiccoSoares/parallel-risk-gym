@@ -1,0 +1,33 @@
+# GCN Training Configuration for Parallel Risk - Parallel Training
+# Optimized for multi-worker training with vectorized environments
+
+env:
+  map_name: "simple_6"
+  max_turns: 50  # Reduced to force aggressive play
+  action_budget: 5
+  seed: null
+  use_reward_shaping: true
+
+model:
+  type: "gcn"
+  hidden_dim: 128
+  num_layers: 3
+  dropout: 0.1
+
+training:
+  # Reduced batch size for faster iterations with parallel collection
+  batch_size: 1024          # Environment steps per update (split across workers)
+  num_epochs: 4             # SGD epochs per batch (reduced for speed)
+  learning_rate: 3.0e-4     # Slightly higher LR with smaller batches
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  entropy_coeff: 0.01
+  value_loss_coeff: 0.5
+  max_grad_norm: 0.5
+  use_gpu: false
+
+logging:
+  log_dir: "runs/gnn_training_parallel"
+  checkpoint_dir: "checkpoints/gnn_training_parallel"
+  checkpoint_interval: 10
