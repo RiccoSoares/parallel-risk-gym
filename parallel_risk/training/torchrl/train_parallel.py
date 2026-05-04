@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
-from torch_geometric.data import Batch
+from torch_geometric.data import Batch, Data
 
 from parallel_risk.training.torchrl.vec_env import make_vec_env
 from parallel_risk.models.gnn_gcn import GCNPolicy
@@ -69,6 +69,7 @@ class PPOTrainerParallel:
         # Training hyperparameters
         train_config = config['training']
         self.batch_size = train_config.get('batch_size', 4096)
+        self.minibatch_size = train_config.get('minibatch_size', 256)  # Samples per minibatch
         self.num_epochs = train_config.get('num_epochs', 10)
         self.learning_rate = train_config.get('learning_rate', 3e-4)
         self.gamma = train_config.get('gamma', 0.99)
@@ -289,7 +290,7 @@ class PPOTrainerParallel:
         return torch.stack(advantages), torch.stack(returns)
 
     def update_policy(self, rollout):
-        """Update policy using PPO - one forward pass per epoch on full batch."""
+        """Update policy using PPO with shuffled minibatches."""
         advantages, returns = self.compute_gae(
             rollout['rewards'],
             rollout['values'],
@@ -298,6 +299,8 @@ class PPOTrainerParallel:
         )
 
         T = len(rollout['observations'])
+        B = rollout['rewards'][0].size(0)  # Batch size per timestep (num_workers * num_agents)
+        total_samples = T * B
 
         # Pre-compute all old log probs and values
         old_log_probs = torch.cat([rollout['log_probs'][t].sum(dim=1).detach() for t in range(T)])
@@ -309,53 +312,133 @@ class PPOTrainerParallel:
         # This ensures consistent gradient scales regardless of reward magnitude
         all_advantages = (all_advantages - all_advantages.mean()) / (all_advantages.std() + 1e-8)
 
-        # Concatenate all observations and actions
-        all_graphs = [rollout['observations'][t] for t in range(T)]
+        # Flatten actions: [T, B, action_budget, 3] -> [T*B, action_budget, 3]
         all_actions = torch.cat([rollout['actions'][t] for t in range(T)], dim=0)
-        mega_batch = Batch.from_data_list(all_graphs)
+
+        # Store per-timestep data for minibatch construction
+        # We need to track which timestep each sample came from for graph batching
+        timestep_indices = torch.arange(T, device=self.device).repeat_interleave(B)
+        sample_indices_within_timestep = torch.arange(B, device=self.device).repeat(T)
 
         for epoch in range(self.num_epochs):
-            # Single forward pass on entire batch
-            action_logits, new_values, _ = self.policy(mega_batch)
+            # Shuffle sample indices for this epoch
+            perm = torch.randperm(total_samples, device=self.device)
 
-            new_log_probs = self.action_decoder.compute_log_probs(
-                action_logits, all_actions, mega_batch.batch
-            ).sum(dim=1)
+            # Process minibatches
+            num_minibatches = max(1, total_samples // self.minibatch_size)
 
-            entropies = self.action_decoder.compute_entropy(
-                action_logits, mega_batch.batch
-            ).mean(dim=1)
+            for mb_idx in range(num_minibatches):
+                start_idx = mb_idx * self.minibatch_size
+                end_idx = min(start_idx + self.minibatch_size, total_samples)
+                mb_indices = perm[start_idx:end_idx]
 
-            new_values = new_values.squeeze(-1)
+                # Get minibatch data
+                mb_old_log_probs = old_log_probs[mb_indices]
+                mb_old_values = old_values[mb_indices]
+                mb_advantages = all_advantages[mb_indices]
+                mb_returns = all_returns[mb_indices]
+                mb_actions = all_actions[mb_indices]
 
-            # PPO losses on full batch
-            ratio = torch.exp(new_log_probs - old_log_probs)
-            surr1 = ratio * all_advantages
-            surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * all_advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
+                # Reconstruct graphs for this minibatch
+                # Group samples by their original timestep for efficient batching
+                mb_timesteps = timestep_indices[mb_indices]
+                mb_sample_idx = sample_indices_within_timestep[mb_indices]
 
-            value_pred_clipped = old_values + torch.clamp(
-                new_values - old_values, -self.clip_epsilon, self.clip_epsilon
-            )
-            value_loss_unclipped = (new_values - all_returns) ** 2
-            value_loss_clipped = (value_pred_clipped - all_returns) ** 2
-            value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+                # Build batched graph from selected samples
+                mb_graphs = []
+                mb_graph_to_sample = []  # Maps graph index back to minibatch index
 
-            entropy_loss = -entropies.mean()
+                # Get unique timesteps and their samples
+                unique_timesteps = mb_timesteps.unique(sorted=True)
 
-            loss = policy_loss + self.value_loss_coeff * value_loss + self.entropy_coeff * entropy_loss
+                for t in unique_timesteps:
+                    t = t.item()
+                    # Get the original batched graph for this timestep
+                    orig_graph = rollout['observations'][t]
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-            self.optimizer.step()
+                    # Find which samples from this timestep are in the minibatch
+                    mask = (mb_timesteps == t)
+                    samples_in_mb = mb_sample_idx[mask]
 
+                    # Extract individual graphs for these samples
+                    # orig_graph.batch tells us which nodes belong to which sample
+                    for local_idx, sample_idx in enumerate(samples_in_mb):
+                        sample_idx = sample_idx.item()
+                        # Extract subgraph for this sample
+                        node_mask = (orig_graph.batch == sample_idx)
+                        subgraph = Data(
+                            x=orig_graph.x[node_mask],
+                            edge_index=self._extract_subgraph_edges(orig_graph.edge_index, node_mask),
+                            num_nodes=node_mask.sum().item()
+                        )
+                        # Get global features for this sample
+                        subgraph.global_features = orig_graph.global_features[sample_idx:sample_idx+1]
+                        mb_graphs.append(subgraph)
+
+                # Batch the minibatch graphs
+                mb_batched = Batch.from_data_list(mb_graphs)
+
+                # Forward pass
+                action_logits, new_values, _ = self.policy(mb_batched)
+
+                new_log_probs = self.action_decoder.compute_log_probs(
+                    action_logits, mb_actions, mb_batched.batch
+                ).sum(dim=1)
+
+                entropies = self.action_decoder.compute_entropy(
+                    action_logits, mb_batched.batch
+                ).mean(dim=1)
+
+                new_values = new_values.squeeze(-1)
+
+                # PPO losses
+                ratio = torch.exp(new_log_probs - mb_old_log_probs)
+                surr1 = ratio * mb_advantages
+                surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * mb_advantages
+                policy_loss = -torch.min(surr1, surr2).mean()
+
+                value_pred_clipped = mb_old_values + torch.clamp(
+                    new_values - mb_old_values, -self.clip_epsilon, self.clip_epsilon
+                )
+                value_loss_unclipped = (new_values - mb_returns) ** 2
+                value_loss_clipped = (value_pred_clipped - mb_returns) ** 2
+                value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+
+                entropy_loss = -entropies.mean()
+
+                loss = policy_loss + self.value_loss_coeff * value_loss + self.entropy_coeff * entropy_loss
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                self.optimizer.step()
+
+        # Log final minibatch losses
         self.writer.add_scalar('Loss/policy', policy_loss.item(), self.global_step)
         self.writer.add_scalar('Loss/value', value_loss.item(), self.global_step)
         self.writer.add_scalar('Loss/entropy', entropy_loss.item(), self.global_step)
         self.writer.add_scalar('Loss/total', loss.item(), self.global_step)
 
         self.global_step += 1
+
+    def _extract_subgraph_edges(self, edge_index, node_mask):
+        """Extract edges for a subgraph given a node mask."""
+        # Get the indices of nodes in the subgraph
+        node_indices = torch.where(node_mask)[0]
+
+        # Create mapping from old indices to new indices
+        index_map = torch.full((node_mask.size(0),), -1, dtype=torch.long, device=edge_index.device)
+        index_map[node_indices] = torch.arange(len(node_indices), device=edge_index.device)
+
+        # Filter edges where both endpoints are in the subgraph
+        src, dst = edge_index
+        edge_mask = node_mask[src] & node_mask[dst]
+
+        # Remap edge indices
+        new_src = index_map[src[edge_mask]]
+        new_dst = index_map[dst[edge_mask]]
+
+        return torch.stack([new_src, new_dst], dim=0)
 
     def train(self, num_iterations: int, checkpoint_interval: int = 10):
         """Main training loop."""
