@@ -75,6 +75,7 @@ class PPOTrainerParallel:
         self.gamma = train_config.get('gamma', 0.99)
         self.gae_lambda = train_config.get('gae_lambda', 0.95)
         self.clip_epsilon = train_config.get('clip_epsilon', 0.2)
+        self.vf_clip_param = train_config.get('vf_clip_param', 10.0)  # Value clip (matches RLlib default)
         self.entropy_coeff = train_config.get('entropy_coeff', 0.01)
         self.value_loss_coeff = train_config.get('value_loss_coeff', 0.5)
         self.max_grad_norm = train_config.get('max_grad_norm', 0.5)
@@ -398,7 +399,7 @@ class PPOTrainerParallel:
                 policy_loss = -torch.min(surr1, surr2).mean()
 
                 value_pred_clipped = mb_old_values + torch.clamp(
-                    new_values - mb_old_values, -self.clip_epsilon, self.clip_epsilon
+                    new_values - mb_old_values, -self.vf_clip_param, self.vf_clip_param
                 )
                 value_loss_unclipped = (new_values - mb_returns) ** 2
                 value_loss_clipped = (value_pred_clipped - mb_returns) ** 2

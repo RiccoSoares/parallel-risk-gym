@@ -137,6 +137,7 @@ class PPOTrainer:
         self.gamma = train_config.get('gamma', 0.99)
         self.gae_lambda = train_config.get('gae_lambda', 0.95)
         self.clip_epsilon = train_config.get('clip_epsilon', 0.2)
+        self.vf_clip_param = train_config.get('vf_clip_param', 10.0)  # Value clip (matches RLlib default)
         self.entropy_coeff = train_config.get('entropy_coeff', 0.01)
         self.value_loss_coeff = train_config.get('value_loss_coeff', 0.5)
         self.max_grad_norm = train_config.get('max_grad_norm', 0.5)
@@ -460,11 +461,10 @@ class PPOTrainer:
             surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages_flat
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            # Bug #3 Fix: Value function clipping
-            # Clip value predictions to be within epsilon of old values
-            # This prevents large value function updates that cause catastrophic forgetting
+            # Value function clipping with separate vf_clip_param (matches RLlib)
+            # Uses larger clip range than policy to allow value network to fit properly
             value_pred_clipped = old_values_flat + torch.clamp(
-                new_values_flat - old_values_flat, -self.clip_epsilon, self.clip_epsilon
+                new_values_flat - old_values_flat, -self.vf_clip_param, self.vf_clip_param
             )
             value_loss_unclipped = (new_values_flat - returns_flat) ** 2
             value_loss_clipped = (value_pred_clipped - returns_flat) ** 2
