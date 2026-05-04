@@ -305,6 +305,10 @@ class PPOTrainerParallel:
         all_advantages = advantages.view(-1)
         all_returns = returns.view(-1)
 
+        # Normalize advantages (standard PPO practice, matches RLlib)
+        # This ensures consistent gradient scales regardless of reward magnitude
+        all_advantages = (all_advantages - all_advantages.mean()) / (all_advantages.std() + 1e-8)
+
         # Concatenate all observations and actions
         all_graphs = [rollout['observations'][t] for t in range(T)]
         all_actions = torch.cat([rollout['actions'][t] for t in range(T)], dim=0)

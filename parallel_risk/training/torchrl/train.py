@@ -386,15 +386,12 @@ class PPOTrainer:
             rollout['next_values']  # Bug #2 fix: pass per-timestep next_values
         )
 
-        # Bug #1 Fix: Do NOT normalize advantages
-        # Previously advantages were normalized but returns were not, creating
-        # a scale mismatch that caused catastrophic forgetting.
-        # Both are now unnormalized for consistency.
-        # (The original normalization line was: advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8))
+        # Normalize advantages (standard PPO practice, matches RLlib)
+        # This ensures consistent gradient scales regardless of reward magnitude
+        # Note: Only normalize advantages, NOT returns - value network predicts actual returns
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Flatten returns for value loss
-        # REMOVED: Value normalization - was causing catastrophic forgetting
-        # The value network predicts unnormalized returns, so we train on unnormalized targets
+        # Flatten returns for value loss (unnormalized - value network predicts actual returns)
         returns_flat = returns.view(-1)
 
         # Flatten timestep dimension
