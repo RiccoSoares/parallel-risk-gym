@@ -22,9 +22,9 @@ training:
   learning_rate: 3.0e-4     # Slightly higher LR with smaller batches
   gamma: 0.99
   gae_lambda: 0.95
-  clip_epsilon: 0.2         # Policy clip parameter
+  clip_epsilon: 0.3         # Policy clip parameter (matches RLlib default)
   vf_clip_param: 10.0       # Value function clip (matches RLlib default)
-  entropy_coeff: 0.01
+  entropy_coeff: 0.03       # Increased for more exploration (was 0.01)
   value_loss_coeff: 0.5
   max_grad_norm: 0.5
   use_gpu: false
