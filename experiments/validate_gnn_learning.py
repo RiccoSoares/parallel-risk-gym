@@ -153,7 +153,7 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
     episode_lengths = []
 
     for episode in range(num_episodes):
-        obs, _ = wrapped_env.reset()
+        obs, _ = wrapped_env.reset(seed=42 + episode)
         done = False
         episode_length = 0
 

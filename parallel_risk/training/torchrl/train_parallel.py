@@ -97,9 +97,9 @@ class PPOTrainerParallel:
         self.action_decoder = ActionDecoder(
             action_budget=self.action_budget,
             max_troops=20,
-            mask_source=True,
-            mask_dest=True,
-            mask_troops=True,
+            mask_source=False,
+            mask_dest=False,
+            mask_troops=False,
         )
 
         # Optimizer
