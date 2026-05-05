@@ -95,13 +95,14 @@ class PPOTrainerParallel:
             dropout=model_config.get('dropout', 0.1)
         ).to(self.device)
 
-        # Create action decoder
+        # Create action decoder with action masking from config
+        masking_config = config.get('masking', {})
         self.action_decoder = ActionDecoder(
             action_budget=self.action_budget,
             max_troops=20,
-            mask_source=False,
-            mask_dest=False,
-            mask_troops=False,
+            mask_source=masking_config.get('mask_source', False),
+            mask_dest=masking_config.get('mask_dest', False),
+            mask_troops=masking_config.get('mask_troops', False),
         )
 
         # Optimizer
@@ -133,6 +134,7 @@ class PPOTrainerParallel:
         """
         rollout = {
             'observations': [],
+            'graph_lists': [],  # Individual graphs for action masking
             'actions': [],
             'rewards': [],
             'values': [],
@@ -241,6 +243,7 @@ class PPOTrainerParallel:
 
             # Store rollout data
             rollout['observations'].append(batched_graph)
+            rollout['graph_lists'].append(all_graphs)  # Store individual graphs for masking
             rollout['actions'].append(actions_tensor)
 
             # Flatten rewards across envs
@@ -374,12 +377,15 @@ class PPOTrainerParallel:
                 # Forward pass
                 action_logits, new_values, _ = self.policy(mb_batched)
 
+                # Pass mb_graphs for action masking (they're already individual graphs)
                 new_log_probs = self.action_decoder.compute_log_probs(
-                    action_logits, mb_actions, mb_batched.batch
+                    action_logits, mb_actions, mb_batched.batch,
+                    observations=mb_graphs
                 ).sum(dim=1)
 
                 entropies = self.action_decoder.compute_entropy(
-                    action_logits, mb_batched.batch
+                    action_logits, mb_batched.batch,
+                    observations=mb_graphs
                 ).mean(dim=1)
 
                 new_values = new_values.squeeze(-1)

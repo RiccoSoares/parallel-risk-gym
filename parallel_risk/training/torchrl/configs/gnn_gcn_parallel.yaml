@@ -14,6 +14,11 @@ model:
   num_layers: 3
   dropout: 0.1
 
+masking:
+  mask_source: true   
+  mask_dest: true     
+  mask_troops: true   
+
 training:
   # Reduced batch size for faster iterations with parallel collection
   batch_size: 1024          # Environment steps per update (split across workers)

@@ -182,17 +182,23 @@ class ActionDecoder:
         self,
         action_logits: List[Dict[str, torch.Tensor]],
         actions: torch.Tensor,
-        batch: torch.Tensor
+        batch: torch.Tensor,
+        observations: List = None,
     ) -> torch.Tensor:
         """
         Compute log probabilities for given actions.
 
         Useful for computing policy gradients.
 
+        IMPORTANT: When action masking is enabled, this method MUST apply the same
+        masks used during action sampling. Otherwise the log probabilities will be
+        computed over a different distribution, corrupting the PPO ratio.
+
         Args:
             action_logits: List of action dicts (length = action_budget)
             actions: [batch_size, action_budget, 3] actions to evaluate
             batch: [num_nodes] batch assignment for each node
+            observations: List of PyG Data observations (required for masking)
 
         Returns:
             log_probs: [batch_size, action_budget] log probabilities
@@ -217,6 +223,31 @@ class ActionDecoder:
                 graph_dest_scores = dest_scores[node_mask]      # [n_territories_i]
                 graph_troops_logits = troops_logits[graph_idx]  # [max_troops]
 
+                # Apply action masking if enabled (must match decode_actions!)
+                if self.mask_source and observations is not None:
+                    source_mask = self._compute_source_mask(observations[graph_idx])
+                    graph_source_scores = torch.where(
+                        source_mask,
+                        graph_source_scores,
+                        torch.tensor(-1e10, device=graph_source_scores.device, dtype=graph_source_scores.dtype)
+                    )
+
+                if self.mask_dest and observations is not None:
+                    dest_mask = self._compute_dest_mask(observations[graph_idx])
+                    graph_dest_scores = torch.where(
+                        dest_mask,
+                        graph_dest_scores,
+                        torch.tensor(-1e10, device=graph_dest_scores.device, dtype=graph_dest_scores.dtype)
+                    )
+
+                if self.mask_troops and observations is not None:
+                    troops_mask = self._compute_troops_mask(observations[graph_idx])
+                    graph_troops_logits = torch.where(
+                        troops_mask,
+                        graph_troops_logits,
+                        torch.tensor(-1e10, device=graph_troops_logits.device, dtype=graph_troops_logits.dtype)
+                    )
+
                 # Extract action components
                 action = actions[graph_idx, action_idx]  # [3]
                 source_idx = action[0].long()
@@ -240,16 +271,22 @@ class ActionDecoder:
     def compute_entropy(
         self,
         action_logits: List[Dict[str, torch.Tensor]],
-        batch: torch.Tensor
+        batch: torch.Tensor,
+        observations: List = None,
     ) -> torch.Tensor:
         """
         Compute entropy of action distributions.
 
         Higher entropy = more exploration.
 
+        IMPORTANT: When action masking is enabled, entropy should be computed over
+        the masked distribution (same as used for sampling). Otherwise entropy will
+        be artificially high (includes probability mass on invalid actions).
+
         Args:
             action_logits: List of action dicts (length = action_budget)
             batch: [num_nodes] batch assignment for each node
+            observations: List of PyG Data observations (required for masking)
 
         Returns:
             entropy: [batch_size, action_budget] entropy values
@@ -271,6 +308,31 @@ class ActionDecoder:
                 graph_source_scores = source_scores[node_mask]  # [n_territories_i]
                 graph_dest_scores = dest_scores[node_mask]      # [n_territories_i]
                 graph_troops_logits = troops_logits[graph_idx]  # [max_troops]
+
+                # Apply action masking if enabled (must match decode_actions!)
+                if self.mask_source and observations is not None:
+                    source_mask = self._compute_source_mask(observations[graph_idx])
+                    graph_source_scores = torch.where(
+                        source_mask,
+                        graph_source_scores,
+                        torch.tensor(-1e10, device=graph_source_scores.device, dtype=graph_source_scores.dtype)
+                    )
+
+                if self.mask_dest and observations is not None:
+                    dest_mask = self._compute_dest_mask(observations[graph_idx])
+                    graph_dest_scores = torch.where(
+                        dest_mask,
+                        graph_dest_scores,
+                        torch.tensor(-1e10, device=graph_dest_scores.device, dtype=graph_dest_scores.dtype)
+                    )
+
+                if self.mask_troops and observations is not None:
+                    troops_mask = self._compute_troops_mask(observations[graph_idx])
+                    graph_troops_logits = torch.where(
+                        troops_mask,
+                        graph_troops_logits,
+                        torch.tensor(-1e10, device=graph_troops_logits.device, dtype=graph_troops_logits.dtype)
+                    )
 
                 # Compute entropy for each component
                 source_dist = torch.distributions.Categorical(logits=graph_source_scores)
@@ -349,8 +411,12 @@ class ActionDecoder:
         """
         # Extract ownership and troops from node features
         ownership = observation.x[:, 1]  # [n_territories]
-        troops_norm = observation.x[:, 0]  # [n_territories], normalized
-        troops = (troops_norm * 100).long()  # Denormalize
+        troops_norm = observation.x[:, 0]  # [n_territories], log-normalized
+
+        # Denormalize troops: graph_wrapper uses log1p normalization
+        # troops_log_normalized = log1p(troops) / log1p(100.0)
+        # Inverse: troops = exp(troops_norm * log1p(100.0)) - 1
+        troops = (torch.exp(troops_norm * torch.log1p(torch.tensor(100.0, device=troops_norm.device))) - 1).long()
 
         # Get income from global features
         # global_features: [1, dim] where dim = [income_norm, turn_norm, region_control...]

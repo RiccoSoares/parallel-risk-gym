@@ -157,13 +157,14 @@ class PPOTrainer:
             dropout=model_config.get('dropout', 0.1)
         ).to(self.device)
 
-        # Create action decoder with action masking disabled
+        # Create action decoder with action masking from config
+        masking_config = config.get('masking', {})
         self.action_decoder = ActionDecoder(
             action_budget=self.action_budget,
             max_troops=20,
-            mask_source=False,
-            mask_dest=False,
-            mask_troops=False,
+            mask_source=masking_config.get('mask_source', False),
+            mask_dest=masking_config.get('mask_dest', False),
+            mask_troops=masking_config.get('mask_troops', False),
         )
 
         # Optimizer
@@ -198,6 +199,7 @@ class PPOTrainer:
         """
         rollout = {
             'observations': [],
+            'graph_lists': [],  # Individual graphs for action masking
             'actions': [],
             'rewards': [],
             'values': [],
@@ -281,6 +283,7 @@ class PPOTrainer:
                     next_value = next_value.squeeze(-1)  # [batch_size]
 
             rollout['observations'].append(batched_graph)
+            rollout['graph_lists'].append(graphs)  # Store individual graphs for masking
             rollout['actions'].append(actions_tensor)
             rollout['rewards'].append(torch.tensor([rewards[agent] for agent in agent_keys], device=self.device))
             rollout['values'].append(values.squeeze(-1))  # [batch_size]
@@ -426,17 +429,19 @@ class PPOTrainer:
                 t = idx.item()
                 action_logits, values, _ = self.policy(rollout['observations'][t])
 
-                # Compute log probs for actions taken
+                # Compute log probs for actions taken (pass observations for masking)
                 log_probs = self.action_decoder.compute_log_probs(
                     action_logits,
                     rollout['actions'][t],
-                    rollout['batches'][t]
+                    rollout['batches'][t],
+                    observations=rollout['graph_lists'][t]
                 )
 
-                # Compute entropy
+                # Compute entropy (pass observations for masking)
                 entropy = self.action_decoder.compute_entropy(
                     action_logits,
-                    rollout['batches'][t]
+                    rollout['batches'][t],
+                    observations=rollout['graph_lists'][t]
                 )
 
                 all_new_log_probs.append(log_probs.sum(dim=1))  # Sum over action_budget

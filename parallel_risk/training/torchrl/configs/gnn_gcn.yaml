@@ -13,6 +13,11 @@ model:
   num_layers: 3
   dropout: 0.1
 
+masking:
+  mask_source: false   
+  mask_dest: false     
+  mask_troops: false   
+
 training:
   num_workers: 4           # Parallel environments (not yet implemented)
   batch_size: 4096         # Environment steps per update (increased from 1024 for stability)
