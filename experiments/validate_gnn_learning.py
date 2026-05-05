@@ -109,12 +109,13 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     config = checkpoint['config']
 
-    # Create environment
+    # Create environment with sparse rewards only
+    # Force sparse rewards for consistent evaluation across all checkpoints
     env = ParallelRiskEnv(
         map_name=config['env']['map_name'],
         max_turns=config['env'].get('max_turns', 100),
         seed=None,
-        reward_shaping_config=None  # Sparse rewards for evaluation
+        reward_shaping_config=None  # Sparse rewards only
     )
     wrapped_env = GraphObservationWrapper(env, device='cpu')
 
@@ -132,10 +133,13 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
     policy.load_state_dict(checkpoint['policy_state_dict'])
     policy.eval()
 
-    # Create action decoder
+    # Create action decoder with action masking disabled (must match training)
     action_decoder = ActionDecoder(
         action_budget=config['env'].get('action_budget', 5),
-        max_troops=20
+        max_troops=20,
+        mask_source=False,
+        mask_dest=False,
+        mask_troops=False,
     )
 
     # Create random opponent
@@ -164,8 +168,10 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
                 with torch.no_grad():
                     batched_graph = Batch.from_data_list([graph_0])
                     action_logits, _, _ = policy(batched_graph)
+                    # Use stochastic sampling to evaluate actual policy distribution
+                    # (deterministic=True only takes mode, which can collapse)
                     actions_tensor, _ = action_decoder.decode_actions(
-                        action_logits, batched_graph.batch, deterministic=True
+                        action_logits, batched_graph.batch, deterministic=False
                     )
                     action_array = actions_tensor[0].cpu().numpy()
                     action_0 = {

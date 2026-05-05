@@ -199,8 +199,10 @@ class PPOTrainerParallel:
 
                 if done:
                     # Log episode stats
-                    avg_reward = np.mean(list(episode_rewards[env_idx].values()))
-                    self.episode_rewards.append(avg_reward)
+                    # In self-play, rewards are symmetric (one wins, one loses)
+                    # Track agent_0's reward to monitor learning progress (consistent with non-parallel trainer)
+                    agent_0_reward = episode_rewards[env_idx].get('agent_0', 0.0)
+                    self.episode_rewards.append(agent_0_reward)
                     self.episode_lengths.append(episode_lengths[env_idx])
 
                     # Reset tracking for this env (next_obs_list already has reset obs due to auto-reset)
@@ -341,40 +343,30 @@ class PPOTrainerParallel:
                 mb_actions = all_actions[mb_indices]
 
                 # Reconstruct graphs for this minibatch
-                # Group samples by their original timestep for efficient batching
+                # IMPORTANT: Build graphs in the SAME ORDER as mb_indices to match actions
                 mb_timesteps = timestep_indices[mb_indices]
                 mb_sample_idx = sample_indices_within_timestep[mb_indices]
 
-                # Build batched graph from selected samples
+                # Build batched graph from selected samples IN ORDER matching mb_indices
                 mb_graphs = []
-                mb_graph_to_sample = []  # Maps graph index back to minibatch index
 
-                # Get unique timesteps and their samples
-                unique_timesteps = mb_timesteps.unique(sorted=True)
+                for i in range(len(mb_indices)):
+                    t = mb_timesteps[i].item()
+                    sample_idx = mb_sample_idx[i].item()
 
-                for t in unique_timesteps:
-                    t = t.item()
                     # Get the original batched graph for this timestep
                     orig_graph = rollout['observations'][t]
 
-                    # Find which samples from this timestep are in the minibatch
-                    mask = (mb_timesteps == t)
-                    samples_in_mb = mb_sample_idx[mask]
-
-                    # Extract individual graphs for these samples
-                    # orig_graph.batch tells us which nodes belong to which sample
-                    for local_idx, sample_idx in enumerate(samples_in_mb):
-                        sample_idx = sample_idx.item()
-                        # Extract subgraph for this sample
-                        node_mask = (orig_graph.batch == sample_idx)
-                        subgraph = Data(
-                            x=orig_graph.x[node_mask],
-                            edge_index=self._extract_subgraph_edges(orig_graph.edge_index, node_mask),
-                            num_nodes=node_mask.sum().item()
-                        )
-                        # Get global features for this sample
-                        subgraph.global_features = orig_graph.global_features[sample_idx:sample_idx+1]
-                        mb_graphs.append(subgraph)
+                    # Extract subgraph for this sample
+                    node_mask = (orig_graph.batch == sample_idx)
+                    subgraph = Data(
+                        x=orig_graph.x[node_mask],
+                        edge_index=self._extract_subgraph_edges(orig_graph.edge_index, node_mask),
+                        num_nodes=node_mask.sum().item()
+                    )
+                    # Get global features for this sample
+                    subgraph.global_features = orig_graph.global_features[sample_idx:sample_idx+1]
+                    mb_graphs.append(subgraph)
 
                 # Batch the minibatch graphs
                 mb_batched = Batch.from_data_list(mb_graphs)

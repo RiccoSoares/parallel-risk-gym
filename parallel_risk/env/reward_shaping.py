@@ -26,7 +26,7 @@ class RewardShapingConfig:
     """
     # Enable/disable individual components
     enable_territory_control: bool = False    # Disabled - encourages passive survival
-    enable_region_completion: bool = True
+    enable_region_completion: bool = False
     enable_troop_advantage: bool = False      # Disabled - encourages passive survival
     enable_strategic_position: bool = False   # Disabled - encourages passive survival
     enable_territory_conquest: bool = True    # Immediate reward for capturing territories
@@ -38,8 +38,8 @@ class RewardShapingConfig:
     region_completion_weight: float = 0.1       # One-time bonus per region
     troop_advantage_weight: float = 0.01        # Per-step reward for troop ratio
     strategic_position_weight: float = 0.005    # Per-step reward for connectivity
-    territory_conquest_weight: float = 0.1      # Immediate reward per territory captured
-    territory_loss_weight: float = 0.1          # Penalty per territory lost (symmetric with conquest)
+    territory_conquest_weight: float = 0.05      # Immediate reward per territory captured
+    territory_loss_weight: float = 0.05          # Penalty per territory lost (symmetric with conquest)
 
     # Terminal reward scale (default 1.0 = unchanged)
     terminal_reward_scale: float = 1.0

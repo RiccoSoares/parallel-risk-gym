@@ -157,13 +157,13 @@ class PPOTrainer:
             dropout=model_config.get('dropout', 0.1)
         ).to(self.device)
 
-        # Create action decoder with action masking enabled
+        # Create action decoder with action masking disabled
         self.action_decoder = ActionDecoder(
             action_budget=self.action_budget,
             max_troops=20,
-            mask_source=True,
-            mask_dest=True,
-            mask_troops=True,
+            mask_source=False,
+            mask_dest=False,
+            mask_troops=False,
         )
 
         # Optimizer
@@ -295,8 +295,10 @@ class PPOTrainer:
 
             if done:
                 # Log episode stats
-                avg_reward = np.mean(list(episode_reward.values()))
-                self.episode_rewards.append(avg_reward)
+                # In self-play, rewards are symmetric (one wins, one loses)
+                # Track agent_0's reward to monitor learning progress
+                agent_0_reward = episode_reward.get('agent_0', 0.0)
+                self.episode_rewards.append(agent_0_reward)
                 self.episode_lengths.append(episode_length)
 
                 # Reset for next episode

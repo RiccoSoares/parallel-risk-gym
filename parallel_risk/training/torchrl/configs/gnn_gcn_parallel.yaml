@@ -3,10 +3,10 @@
 
 env:
   map_name: "simple_6"
-  max_turns: 50  # Reduced to force aggressive play
+  max_turns: 100  # Reduced to force aggressive play
   action_budget: 5
   seed: null
-  use_reward_shaping: true
+  use_reward_shaping: true  # Enable dense rewards for better learning signal
 
 model:
   type: "gcn"
