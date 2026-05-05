@@ -95,14 +95,10 @@ class PPOTrainerParallel:
             dropout=model_config.get('dropout', 0.1)
         ).to(self.device)
 
-        # Create action decoder with action masking from config
-        masking_config = config.get('masking', {})
+        # Create action decoder (uses autoregressive masking automatically)
         self.action_decoder = ActionDecoder(
             action_budget=self.action_budget,
             max_troops=20,
-            mask_source=masking_config.get('mask_source', False),
-            mask_dest=masking_config.get('mask_dest', False),
-            mask_troops=masking_config.get('mask_troops', False),
         )
 
         # Optimizer

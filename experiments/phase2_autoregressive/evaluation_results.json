@@ -1,0 +1,70 @@
+{
+  "evaluations": {
+    "10": {
+      "win_rate": 1.0,
+      "loss_rate": 0.0,
+      "draw_rate": 0.0,
+      "wins": 20,
+      "losses": 0,
+      "draws": 0,
+      "total_episodes": 20,
+      "avg_episode_length": 17.3,
+      "std_episode_length": 6.3568860301251275,
+      "episode_lengths": [
+        19,
+        29,
+        32,
+        17,
+        17,
+        18,
+        19,
+        26,
+        12,
+        26,
+        12,
+        14,
+        17,
+        9,
+        11,
+        18,
+        14,
+        11,
+        9,
+        16
+      ]
+    },
+    "20": {
+      "win_rate": 1.0,
+      "loss_rate": 0.0,
+      "draw_rate": 0.0,
+      "wins": 20,
+      "losses": 0,
+      "draws": 0,
+      "total_episodes": 20,
+      "avg_episode_length": 18.8,
+      "std_episode_length": 7.947326594522211,
+      "episode_lengths": [
+        33,
+        26,
+        37,
+        19,
+        14,
+        17,
+        11,
+        15,
+        23,
+        28,
+        9,
+        13,
+        16,
+        10,
+        18,
+        29,
+        13,
+        22,
+        10,
+        13
+      ]
+    }
+  }
+}

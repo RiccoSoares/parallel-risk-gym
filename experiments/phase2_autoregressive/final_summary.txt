@@ -1,0 +1,30 @@
+======================================================================
+PHASE 2 GNN LEARNING VALIDATION EXPERIMENT
+======================================================================
+
+Date: 2026-05-04 23:31:18
+Architecture: GNN (GCN) + PPO
+Map: simple_6
+Reward shaping: Sparse (terminal only)
+
+Evaluated 2 checkpoints:
+
+Iteration | Win Rate | Losses | Draws | Avg Ep Length
+----------------------------------------------------------------------
+       10 | 100.00% |      0 |     0 |          17.3
+       20 | 100.00% |      0 |     0 |          18.8
+
+======================================================================
+LEARNING VALIDATION RESULTS
+======================================================================
+
+Final win rate (iteration 20): 100.00%
+
+✓ SUCCESS: GNN agent achieved >70% win rate vs. random
+  Learning has been validated!
+
+======================================================================
+
+Win Rate Progression:
+  Iter   10: ██████████████████████████████████████████████████ 100.00%
+  Iter   20: ██████████████████████████████████████████████████ 100.00%

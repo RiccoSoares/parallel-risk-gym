@@ -133,14 +133,10 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
     policy.load_state_dict(checkpoint['policy_state_dict'])
     policy.eval()
 
-    # Create action decoder with action masking from checkpoint config
-    masking_config = config.get('masking', {})
+    # Create action decoder (uses autoregressive masking automatically)
     action_decoder = ActionDecoder(
         action_budget=config['env'].get('action_budget', 5),
         max_troops=20,
-        mask_source=masking_config.get('mask_source', False),
-        mask_dest=masking_config.get('mask_dest', False),
-        mask_troops=masking_config.get('mask_troops', False),
     )
 
     # Create random opponent
