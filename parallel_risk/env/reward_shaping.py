@@ -25,10 +25,12 @@ class RewardShapingConfig:
     Recommended starting values provided as defaults.
     """
     # Enable/disable individual components
-    enable_territory_control: bool = True
-    enable_region_completion: bool = True
-    enable_troop_advantage: bool = True
-    enable_strategic_position: bool = True
+    enable_territory_control: bool = False    # Disabled - encourages passive survival
+    enable_region_completion: bool = False
+    enable_troop_advantage: bool = False      # Disabled - encourages passive survival
+    enable_strategic_position: bool = False   # Disabled - encourages passive survival
+    enable_territory_conquest: bool = True    # Immediate reward for capturing territories
+    enable_territory_loss: bool = True        # Penalty for losing territories
 
     # Coefficient for each reward component
     # These scale the shaped rewards relative to terminal +1/-1
@@ -36,6 +38,8 @@ class RewardShapingConfig:
     region_completion_weight: float = 0.1       # One-time bonus per region
     troop_advantage_weight: float = 0.01        # Per-step reward for troop ratio
     strategic_position_weight: float = 0.005    # Per-step reward for connectivity
+    territory_conquest_weight: float = 0.05      # Immediate reward per territory captured
+    territory_loss_weight: float = 0.05          # Penalty per territory lost (symmetric with conquest)
 
     # Terminal reward scale (default 1.0 = unchanged)
     terminal_reward_scale: float = 1.0
@@ -71,9 +75,25 @@ class RewardShaper:
         # Track previous state for region completion detection
         self._previous_controlled_regions = {}
 
+        # Track previous territory ownership for conquest detection
+        self._previous_territory_ownership = None
+
     def reset(self):
         """Reset internal state at episode start."""
         self._previous_controlled_regions = {}
+        self._previous_territory_ownership = None
+
+    def begin_step(self, game_state: Dict):
+        """Call at the beginning of each step, before actions are executed.
+
+        Captures the game state before actions are taken, allowing conquest
+        detection by comparing pre-action and post-action states.
+
+        Args:
+            game_state: Current game state dict before action execution
+        """
+        # Store ownership before actions are executed
+        self._pre_step_ownership = game_state['territory_ownership'].copy()
 
     def _compute_strategic_values(self) -> np.ndarray:
         """Compute strategic value of each territory based on connectivity.
@@ -146,6 +166,23 @@ class RewardShaper:
                     game_state, agent_idx
                 )
                 rewards[agent] += self.config.strategic_position_weight * strategic_reward
+
+            # 5. Territory conquest reward (immediate bonus for capturing territories)
+            if self.config.enable_territory_conquest:
+                conquest_reward = self._compute_territory_conquest_reward(
+                    game_state, agent_idx
+                )
+                rewards[agent] += self.config.territory_conquest_weight * conquest_reward
+
+            # 6. Territory loss penalty (immediate penalty for losing territories)
+            if self.config.enable_territory_loss:
+                loss_penalty = self._compute_territory_loss_penalty(
+                    game_state, agent_idx
+                )
+                rewards[agent] -= self.config.territory_loss_weight * loss_penalty
+
+        # Update previous ownership tracking for next step
+        self._previous_territory_ownership = game_state['territory_ownership'].copy()
 
         return rewards
 
@@ -246,6 +283,60 @@ class RewardShaper:
 
         return float(normalized_score)
 
+    def _compute_territory_conquest_reward(
+        self,
+        game_state: Dict,
+        agent_idx: int
+    ) -> float:
+        """Immediate reward for capturing enemy territories.
+
+        Returns the number of territories newly captured this step.
+        This provides instant positive feedback for aggressive play.
+
+        Note: Requires begin_step() to be called before actions are executed.
+        """
+        if not hasattr(self, '_pre_step_ownership') or self._pre_step_ownership is None:
+            # First step or begin_step not called - no conquest detection possible
+            return 0.0
+
+        current_ownership = game_state['territory_ownership']
+        previous_ownership = self._pre_step_ownership
+
+        # Count territories that changed from enemy to this agent
+        # (was not owned by agent, now is owned by agent)
+        was_not_mine = previous_ownership != agent_idx
+        is_mine_now = current_ownership == agent_idx
+        newly_captured = np.sum(was_not_mine & is_mine_now)
+
+        return float(newly_captured)
+
+    def _compute_territory_loss_penalty(
+        self,
+        game_state: Dict,
+        agent_idx: int
+    ) -> float:
+        """Penalty for losing territories to enemies.
+
+        Returns the number of territories lost this step.
+        This creates strong disincentive for passive play that allows captures.
+
+        Note: Requires begin_step() to be called before actions are executed.
+        """
+        if not hasattr(self, '_pre_step_ownership') or self._pre_step_ownership is None:
+            # First step or begin_step not called - no loss detection possible
+            return 0.0
+
+        current_ownership = game_state['territory_ownership']
+        previous_ownership = self._pre_step_ownership
+
+        # Count territories that changed from this agent to enemy
+        # (was owned by agent, now is not owned by agent)
+        was_mine = previous_ownership == agent_idx
+        is_not_mine_now = current_ownership != agent_idx
+        territories_lost = np.sum(was_mine & is_not_mine_now)
+
+        return float(territories_lost)
+
     def scale_terminal_rewards(self, base_rewards: Dict[str, float]) -> Dict[str, float]:
         """Scale terminal rewards (+1/-1) by configured factor.
 
@@ -296,6 +387,16 @@ class RewardShaper:
                     game_state, agent_idx
                 ) * self.config.strategic_position_weight
 
+            if self.config.enable_territory_conquest:
+                info[agent]['territory_conquest'] = self._compute_territory_conquest_reward(
+                    game_state, agent_idx
+                ) * self.config.territory_conquest_weight
+
+            if self.config.enable_territory_loss:
+                info[agent]['territory_loss'] = -self._compute_territory_loss_penalty(
+                    game_state, agent_idx
+                ) * self.config.territory_loss_weight
+
             info[agent]['total_shaped'] = sum(info[agent].values())
 
         return info
@@ -344,4 +445,23 @@ def create_aggressive_config() -> RewardShapingConfig:
         enable_strategic_position=True,
         troop_advantage_weight=0.02,
         strategic_position_weight=0.01,
+    )
+
+
+def create_conquest_config() -> RewardShapingConfig:
+    """Focus on territory conquest - immediate reward for capturing territories.
+
+    Designed to encourage aggressive play and discourage defensive strategies.
+    Includes territory loss penalty to punish being attacked successfully.
+    """
+    return RewardShapingConfig(
+        enable_territory_control=False,
+        enable_region_completion=True,
+        enable_troop_advantage=False,
+        enable_strategic_position=False,
+        enable_territory_conquest=True,
+        enable_territory_loss=True,
+        region_completion_weight=0.15,
+        territory_conquest_weight=0.1,
+        territory_loss_weight=0.1,
     )

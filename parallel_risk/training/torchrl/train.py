@@ -22,6 +22,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch_geometric.data import Batch
 
 from parallel_risk import ParallelRiskEnv
+from parallel_risk.env.reward_shaping import RewardShapingConfig
 from parallel_risk.training.torchrl.graph_wrapper import GraphObservationWrapper, env_to_graph
 from parallel_risk.models.gnn_gcn import GCNPolicy
 from parallel_risk.models.action_decoder import ActionDecoder
@@ -108,10 +109,17 @@ class PPOTrainer:
 
         # Create environment to get observation/action space info
         env_config = config['env']
+
+        # Setup reward shaping if enabled
+        reward_shaping_config = None
+        if env_config.get('use_reward_shaping', True):  # Default to True
+            reward_shaping_config = RewardShapingConfig()  # Uses default (all enabled)
+
         self.env = ParallelRiskEnv(
             map_name=env_config['map_name'],
             max_turns=env_config.get('max_turns', 100),
-            seed=env_config.get('seed', None)
+            seed=env_config.get('seed', None),
+            reward_shaping_config=reward_shaping_config
         )
         self.wrapped_env = GraphObservationWrapper(self.env, device=self.device)
 
@@ -129,6 +137,7 @@ class PPOTrainer:
         self.gamma = train_config.get('gamma', 0.99)
         self.gae_lambda = train_config.get('gae_lambda', 0.95)
         self.clip_epsilon = train_config.get('clip_epsilon', 0.2)
+        self.vf_clip_param = train_config.get('vf_clip_param', 10.0)  # Value clip (matches RLlib default)
         self.entropy_coeff = train_config.get('entropy_coeff', 0.01)
         self.value_loss_coeff = train_config.get('value_loss_coeff', 0.5)
         self.max_grad_norm = train_config.get('max_grad_norm', 0.5)
@@ -148,10 +157,13 @@ class PPOTrainer:
             dropout=model_config.get('dropout', 0.1)
         ).to(self.device)
 
-        # Create action decoder
+        # Create action decoder with action masking disabled
         self.action_decoder = ActionDecoder(
             action_budget=self.action_budget,
-            max_troops=20
+            max_troops=20,
+            mask_source=False,
+            mask_dest=False,
+            mask_troops=False,
         )
 
         # Optimizer
@@ -192,7 +204,7 @@ class PPOTrainer:
             'log_probs': [],
             'dones': [],
             'batches': [],  # Batch indices for graph data
-            'next_obs': None,  # Next observation for GAE bootstrapping (Bug #2 fix)
+            'next_values': [],  # Next state values for GAE (Bug #2 fix: store per-timestep)
         }
 
         # Reset environment
@@ -218,9 +230,10 @@ class PPOTrainer:
             with torch.no_grad():
                 action_logits, values, _ = self.policy(batched_graph)
 
-            # Sample actions
+            # Sample actions with masking using graph observations
             actions_tensor, log_probs = self.action_decoder.decode_actions(
-                action_logits, batched_graph.batch, deterministic=False, return_log_probs=True
+                action_logits, batched_graph.batch, deterministic=False, return_log_probs=True,
+                observations=graphs
             )
 
             # Convert actions to environment format
@@ -243,25 +256,49 @@ class PPOTrainer:
 
             # Check if episode ended
             done = terminateds.get('__all__', False) or truncateds.get('__all__', False)
+            is_truncated = truncateds.get('__all__', False)
+            is_terminated = terminateds.get('__all__', False)
 
             # Store experience (before checking done, so we have consistent batch sizes)
             # Only include actual agent keys, not '__all__'
             agent_keys = [k for k in sorted(rewards.keys()) if k != '__all__']
+
+            # Compute next_value for GAE bootstrapping
+            # Key distinction:
+            #   - Terminated: game naturally ended (victory/elimination) -> bootstrap with 0
+            #   - Truncated: game artificially cut off (turn limit) -> bootstrap with V(s')
+            # This is critical for learning: truncation means the game WOULD continue,
+            # so the value estimate should account for potential future rewards.
+            if is_terminated:
+                # True termination (victory/elimination): no future value
+                next_value = torch.zeros(len(agent_keys), device=self.device)
+            else:
+                # Non-terminal OR truncated: compute value of next state for bootstrapping
+                next_graphs = [next_obs[agent] for agent in sorted(next_obs.keys())]
+                next_batched_graph = Batch.from_data_list(next_graphs)
+                with torch.no_grad():
+                    _, next_value, _ = self.policy(next_batched_graph)
+                    next_value = next_value.squeeze(-1)  # [batch_size]
 
             rollout['observations'].append(batched_graph)
             rollout['actions'].append(actions_tensor)
             rollout['rewards'].append(torch.tensor([rewards[agent] for agent in agent_keys], device=self.device))
             rollout['values'].append(values.squeeze(-1))  # [batch_size]
             rollout['log_probs'].append(log_probs)  # [batch_size, action_budget]
-            rollout['dones'].append(torch.tensor([terminateds[agent] for agent in agent_keys], dtype=torch.bool, device=self.device))
+            # Store episode boundaries (both terminated AND truncated) for GAE propagation masking
+            # GAE should not propagate across episode boundaries regardless of termination type
+            rollout['dones'].append(torch.tensor([done for _ in agent_keys], dtype=torch.bool, device=self.device))
             rollout['batches'].append(batched_graph.batch)
+            rollout['next_values'].append(next_value)  # Stores V(s') for truncated, 0 for terminated
 
             steps_collected += 1
 
             if done:
                 # Log episode stats
-                avg_reward = np.mean(list(episode_reward.values()))
-                self.episode_rewards.append(avg_reward)
+                # In self-play, rewards are symmetric (one wins, one loses)
+                # Track agent_0's reward to monitor learning progress
+                agent_0_reward = episode_reward.get('agent_0', 0.0)
+                self.episode_rewards.append(agent_0_reward)
                 self.episode_lengths.append(episode_length)
 
                 # Reset for next episode
@@ -271,26 +308,25 @@ class PPOTrainer:
             else:
                 obs = next_obs
 
-        # Store final observation for GAE bootstrapping (Bug #2 fix)
-        # If episode ended, obs is already the new episode start state
-        # Otherwise, obs is the next state we would have stepped from
-        if len(obs) > 0:
-            graphs = [obs[agent] for agent in sorted(obs.keys())]
-            rollout['next_obs'] = Batch.from_data_list(graphs)
-
         return rollout
 
-    def compute_gae(self, rewards, values, dones, next_obs=None):
+    def compute_gae(self, rewards, values, dones, next_values):
         """
         Compute Generalized Advantage Estimation (GAE).
 
-        Bug #2 Fix: Now properly bootstraps from next state value for non-terminal states.
+        Properly handles termination vs truncation semantics:
+        - Terminated (victory/elimination): next_value=0, GAE stops
+        - Truncated (turn limit): next_value=V(s'), GAE stops but bootstraps with value
+        - Non-terminal: next_value=V(s'), GAE propagates
+
+        The key distinction is that truncated episodes still have continuation value
+        (the game WOULD continue), so we bootstrap with V(s') rather than 0.
 
         Args:
             rewards: List of reward tensors [batch_size]
             values: List of value tensors [batch_size]
-            dones: List of done flags [batch_size]
-            next_obs: Next observation for bootstrapping (optional)
+            dones: List of episode boundary flags [batch_size] (True if episode ended)
+            next_values: List of next state values [batch_size] (0 for terminated, V(s') for truncated/non-terminal)
 
         Returns:
             advantages: Tensor of advantages
@@ -310,30 +346,28 @@ class PPOTrainer:
 
         gae = torch.zeros(batch_size, device=self.device)
 
-        # Bootstrap from next state value for non-terminal states (Bug #2 fix)
-        if next_obs is not None:
-            with torch.no_grad():
-                _, next_value, _ = self.policy(next_obs)
-                next_value = next_value.squeeze(-1)  # [batch_size]
-        else:
-            next_value = torch.zeros(batch_size, device=self.device)
-
         # Reverse iteration through trajectory
         for t in reversed(range(len(rewards))):
-            # Mask out value for terminal states
+            # next_val is:
+            #   - 0 for terminated states (victory/elimination)
+            #   - V(s') for truncated states (turn limit) - allows bootstrapping!
+            #   - V(s') for non-terminal states
+            next_val = next_values[t]
+
+            # Mask for GAE propagation - don't propagate across episode boundaries
+            # (applies to both terminated and truncated episodes)
             mask = 1.0 - dones[t].float()
 
             # TD error: δ_t = r_t + γ * V(s_{t+1}) - V(s_t)
-            delta = rewards[t] + self.gamma * next_value * mask - values[t]
+            # For truncated episodes, next_val = V(s') allows proper bootstrapping
+            delta = rewards[t] + self.gamma * next_val - values[t]
 
             # GAE: A_t = δ_t + (γλ) * A_{t+1}
+            # Only propagate GAE from future steps if not at episode boundary
             gae = delta + self.gamma * self.gae_lambda * mask * gae
 
             advantages.insert(0, gae.clone())
             returns.insert(0, gae + values[t])
-
-            # Update next_value for previous timestep
-            next_value = values[t]
 
         advantages = torch.stack(advantages)
         returns = torch.stack(returns)
@@ -347,37 +381,49 @@ class PPOTrainer:
         Args:
             rollout: Collected experience
         """
-        # Compute advantages with proper bootstrapping (Bug #2 fix)
+        # Compute advantages with proper per-timestep bootstrapping (Bug #2 fix)
         advantages, returns = self.compute_gae(
             rollout['rewards'],
             rollout['values'],
             rollout['dones'],
-            rollout['next_obs']  # Pass next observation for bootstrapping
+            rollout['next_values']  # Bug #2 fix: pass per-timestep next_values
         )
 
-        # Normalize advantages
+        # Normalize advantages (standard PPO practice, matches RLlib)
+        # This ensures consistent gradient scales regardless of reward magnitude
+        # Note: Only normalize advantages, NOT returns - value network predicts actual returns
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Update return statistics and normalize returns (Bug #3 fix)
+        # Flatten returns for value loss (unnormalized - value network predicts actual returns)
         returns_flat = returns.view(-1)
-        self.return_rms.update(returns_flat)
-        returns_normalized = self.return_rms.normalize(returns_flat)
 
         # Flatten timestep dimension
         T = len(rollout['observations'])
         B = rollout['rewards'][0].size(0)
 
-        advantages_flat = advantages.view(-1)
-        old_log_probs_flat = torch.cat([lp.sum(dim=1) for lp in rollout['log_probs']]).detach()  # Sum over action_budget, detach to prevent gradient flow
+        # Prepare per-timestep tensors for shuffling
+        advantages_per_timestep = [advantages[t] for t in range(T)]  # List of [B] tensors
+        old_log_probs_per_timestep = [rollout['log_probs'][t].sum(dim=1).detach() for t in range(T)]  # List of [B] tensors
+        returns_per_timestep = [returns[t] for t in range(T)]  # List of [B] tensors
+        old_values_per_timestep = [rollout['values'][t].detach() for t in range(T)]  # Bug #3 fix: store old values for clipping
 
-        # Multiple epochs of SGD
+        # Multiple epochs of SGD with shuffled timesteps
+        # Shuffling reduces overfitting to temporal ordering in small batches
         for epoch in range(self.num_epochs):
-            # Compute new log probs and values
+            # Shuffle timestep indices for this epoch
+            timestep_indices = torch.randperm(T)
+
+            # Compute new log probs and values in shuffled order
             all_new_log_probs = []
             all_new_values = []
             all_entropies = []
+            all_advantages = []
+            all_old_log_probs = []
+            all_returns = []
+            all_old_values = []  # Bug #3 fix: track old values
 
-            for t in range(T):
+            for idx in timestep_indices:
+                t = idx.item()
                 action_logits, values, _ = self.policy(rollout['observations'][t])
 
                 # Compute log probs for actions taken
@@ -397,9 +443,19 @@ class PPOTrainer:
                 all_new_values.append(values.squeeze(-1))
                 all_entropies.append(entropy.mean(dim=1))  # Mean over action_budget
 
+                # Gather corresponding old values in same shuffled order
+                all_advantages.append(advantages_per_timestep[t])
+                all_old_log_probs.append(old_log_probs_per_timestep[t])
+                all_returns.append(returns_per_timestep[t])
+                all_old_values.append(old_values_per_timestep[t])  # Bug #3 fix
+
             new_log_probs_flat = torch.cat(all_new_log_probs)
             new_values_flat = torch.cat(all_new_values)
             entropies_flat = torch.cat(all_entropies)
+            advantages_flat = torch.cat(all_advantages)
+            old_log_probs_flat = torch.cat(all_old_log_probs)
+            returns_flat = torch.cat(all_returns)
+            old_values_flat = torch.cat(all_old_values)  # Bug #3 fix
 
             # PPO policy loss
             ratio = torch.exp(new_log_probs_flat - old_log_probs_flat)
@@ -407,8 +463,14 @@ class PPOTrainer:
             surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages_flat
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            # Value loss - now uses normalized returns (Bug #3 fix)
-            value_loss = nn.functional.mse_loss(new_values_flat, returns_normalized)
+            # Value function clipping with separate vf_clip_param (matches RLlib)
+            # Uses larger clip range than policy to allow value network to fit properly
+            value_pred_clipped = old_values_flat + torch.clamp(
+                new_values_flat - old_values_flat, -self.vf_clip_param, self.vf_clip_param
+            )
+            value_loss_unclipped = (new_values_flat - returns_flat) ** 2
+            value_loss_clipped = (value_pred_clipped - returns_flat) ** 2
+            value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
 
             # Entropy bonus
             entropy_loss = -entropies_flat.mean()
@@ -428,9 +490,12 @@ class PPOTrainer:
                 self.writer.add_scalar('Loss/value', value_loss.item(), self.global_step)
                 self.writer.add_scalar('Loss/entropy', entropy_loss.item(), self.global_step)
                 self.writer.add_scalar('Loss/total', loss.item(), self.global_step)
-                # Log return statistics for monitoring (Bug #3 related)
-                self.writer.add_scalar('Stats/return_mean', self.return_rms.mean, self.global_step)
-                self.writer.add_scalar('Stats/return_std', torch.sqrt(torch.tensor(self.return_rms.var)).item(), self.global_step)
+                # Log return statistics for monitoring
+                self.writer.add_scalar('Stats/return_mean', returns_flat.mean().item(), self.global_step)
+                self.writer.add_scalar('Stats/return_std', returns_flat.std().item(), self.global_step)
+                # Log value clipping statistics
+                clip_fraction = (torch.abs(new_values_flat - old_values_flat) > self.clip_epsilon).float().mean()
+                self.writer.add_scalar('Stats/value_clip_fraction', clip_fraction.item(), self.global_step)
 
         self.global_step += 1
 

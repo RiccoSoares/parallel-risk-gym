@@ -79,9 +79,14 @@ def env_to_graph(
     # Create node features
     node_features = []
 
-    # Feature 1: Troop count (normalized to [0, 1] range, assuming max 100 troops)
-    troops_normalized = troops / 100.0
-    node_features.append(troops_normalized)
+    # Feature 1: Troop count (log-scaled for better variance preservation)
+    # Problem: Linear normalization (troops/100) compresses values too much
+    #   - 3 troops → 0.03, 30 troops → 0.30 (tiny differences, std ~0.02)
+    # Solution: Use log1p (log(1+x)) to spread out small values
+    #   - 3 troops → log(4)≈1.39, 30 troops → log(31)≈3.43 (better separation)
+    #   - Then divide by log(101) to keep in reasonable range
+    troops_log_normalized = np.log1p(troops) / np.log1p(100.0)
+    node_features.append(troops_log_normalized)
 
     # Feature 2: Ownership (-1, 0, 1)
     node_features.append(ownership)
@@ -91,8 +96,10 @@ def env_to_graph(
     in_degree_normalized = in_degree / n_territories  # Normalize
     node_features.append(in_degree_normalized)
 
-    # Features 4+: Region membership (one-hot encoding)
+    # Features 4+: Region membership (multi-hot encoding)
     # Create territory-to-region mapping
+    # Note: Territories can belong to multiple regions (e.g., 'center' overlaps with 'north'/'south')
+    # We keep raw multi-hot values so the GNN can learn that territories in multiple regions are special
     territory_to_region = np.zeros((n_territories, n_regions), dtype=np.float32)
     for region_idx, (region_name, territories) in enumerate(map_config.regions.items()):
         for territory_id in territories:
@@ -127,6 +134,11 @@ def env_to_graph(
     x = torch.tensor(node_features, dtype=torch.float32, device=device)
     edge_index = torch.tensor(edge_index, dtype=torch.long, device=device)
     global_features = torch.tensor(global_features, dtype=torch.float32, device=device)
+
+    # Ensure global_features is 2D [1, dim] for proper batching
+    # PyG Batch.from_data_list() will stack these along dim=0 to get [batch_size, dim]
+    if global_features.dim() == 1:
+        global_features = global_features.unsqueeze(0)  # [1, dim]
 
     # Create PyTorch Geometric Data object
     data = Data(

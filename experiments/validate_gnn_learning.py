@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 
-def run_training(config_path, num_iterations, checkpoint_dir, verbose=True):
+def run_training(config_path, num_iterations, checkpoint_dir, verbose=True, parallel=False, num_workers=4):
     """Run GNN+PPO training."""
     print("\n" + "="*70)
     print("STEP 1: Training GNN+PPO Agent")
@@ -31,23 +31,38 @@ def run_training(config_path, num_iterations, checkpoint_dir, verbose=True):
     if verbose:
         print(f"Training for {num_iterations} iterations")
         print(f"Checkpoints will be saved to: {checkpoint_dir}")
+        if parallel:
+            print(f"Using parallel training with {num_workers} workers")
         print("This will take approximately 30-60 minutes...\n")
 
     # Import training components
-    from parallel_risk.training.torchrl.train import PPOTrainer, load_config
+    if parallel:
+        from parallel_risk.training.torchrl.train_parallel import PPOTrainerParallel, load_config
+    else:
+        from parallel_risk.training.torchrl.train import PPOTrainer, load_config
 
     # Load config
     config = load_config(config_path)
 
     # Override checkpoint directory
     config['checkpoint_dir'] = str(checkpoint_dir)
+    if 'logging' not in config:
+        config['logging'] = {}
+    config['logging']['checkpoint_dir'] = str(checkpoint_dir)
 
     # Create trainer
-    trainer = PPOTrainer(config)
+    if parallel:
+        trainer = PPOTrainerParallel(config, num_workers=num_workers)
+    else:
+        trainer = PPOTrainer(config)
 
     # Train
     try:
-        trainer.train(num_iterations)
+        if parallel:
+            trainer.train(num_iterations, checkpoint_interval=10)
+            trainer.vec_env.close()
+        else:
+            trainer.train(num_iterations)
         print("\n✓ Training completed successfully")
         return True
     except Exception as e:
@@ -94,12 +109,13 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     config = checkpoint['config']
 
-    # Create environment
+    # Create environment with sparse rewards only
+    # Force sparse rewards for consistent evaluation across all checkpoints
     env = ParallelRiskEnv(
         map_name=config['env']['map_name'],
         max_turns=config['env'].get('max_turns', 100),
         seed=None,
-        reward_shaping_config=None  # Sparse rewards for evaluation
+        reward_shaping_config=None  # Sparse rewards only
     )
     wrapped_env = GraphObservationWrapper(env, device='cpu')
 
@@ -117,10 +133,13 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
     policy.load_state_dict(checkpoint['policy_state_dict'])
     policy.eval()
 
-    # Create action decoder
+    # Create action decoder with action masking disabled (must match training)
     action_decoder = ActionDecoder(
         action_budget=config['env'].get('action_budget', 5),
-        max_troops=20
+        max_troops=20,
+        mask_source=False,
+        mask_dest=False,
+        mask_troops=False,
     )
 
     # Create random opponent
@@ -138,7 +157,7 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
     episode_lengths = []
 
     for episode in range(num_episodes):
-        obs, _ = wrapped_env.reset()
+        obs, _ = wrapped_env.reset(seed=42 + episode)
         done = False
         episode_length = 0
 
@@ -149,8 +168,10 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
                 with torch.no_grad():
                     batched_graph = Batch.from_data_list([graph_0])
                     action_logits, _, _ = policy(batched_graph)
+                    # Use stochastic sampling to evaluate actual policy distribution
+                    # (deterministic=True only takes mode, which can collapse)
                     actions_tensor, _ = action_decoder.decode_actions(
-                        action_logits, batched_graph.batch, deterministic=True
+                        action_logits, batched_graph.batch, deterministic=False
                     )
                     action_array = actions_tensor[0].cpu().numpy()
                     action_0 = {
@@ -410,6 +431,23 @@ def main():
         help="Skip training, only evaluate existing checkpoints"
     )
     parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Use parallel training with vectorized environments"
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of parallel workers (default: 4, only used with --parallel)"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Alias for --results-dir (for backwards compatibility)"
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         default=True,
@@ -417,6 +455,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Handle output-dir alias
+    if args.output_dir:
+        args.results_dir = args.output_dir
 
     # Convert to paths
     results_dir = Path(args.results_dir)
@@ -438,7 +480,10 @@ def main():
     print(f"  Results dir:          {results_dir}")
     print(f"  Architecture:         GNN (GCN) + PPO")
     print(f"  Map:                  simple_6")
-    print(f"  Reward shaping:       Sparse (terminal only)")
+    if args.parallel:
+        print(f"  Training mode:        Parallel ({args.num_workers} workers)")
+    else:
+        print(f"  Training mode:        Single-threaded")
 
     # Step 1: Training
     if not args.skip_training:
@@ -446,7 +491,9 @@ def main():
             config_path,
             args.num_iterations,
             checkpoint_dir,
-            verbose=args.verbose
+            verbose=args.verbose,
+            parallel=args.parallel,
+            num_workers=args.num_workers
         )
 
         if not success:

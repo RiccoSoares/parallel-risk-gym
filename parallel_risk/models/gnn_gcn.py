@@ -72,14 +72,20 @@ class GCNPolicy(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # Batch normalization after each GCN layer
-        self.batch_norms = nn.ModuleList([
-            nn.BatchNorm1d(hidden_dim)
+        # Layer normalization after each GCN layer
+        # Using LayerNorm instead of BatchNorm to avoid mixing statistics
+        # across different game states in batched graphs (critical for self-play)
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim)
             for _ in range(num_layers)
         ])
 
         # Global features processing
         self.global_proj = nn.Linear(global_features_dim, hidden_dim)
+
+        # FIX: Add LayerNorm before value head to normalize the concatenated inputs
+        # (graph_embedding and global_emb may have very different magnitudes)
+        self.value_input_norm = nn.LayerNorm(hidden_dim * 2)
 
         # Value head (critic)
         # Takes graph-level embedding (global pooled nodes + global features)
@@ -150,16 +156,17 @@ class GCNPolicy(nn.Module):
         x = F.relu(x)
 
         # Apply GCN layers with residual connections
-        for i, (conv, bn) in enumerate(zip(self.conv_layers, self.batch_norms)):
+        for i, (conv, ln) in enumerate(zip(self.conv_layers, self.layer_norms)):
             x_residual = x
             x = conv(x, edge_index)  # [num_nodes, hidden_dim]
-            x = bn(x)
+            x = ln(x)  # LayerNorm: normalizes per node independently
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
 
-            # Residual connection (skip connection)
-            if i > 0:  # Skip first layer residual for dimensionality matching
-                x = x + x_residual
+            # Residual connection (skip connection) for ALL layers
+            # FIX: Previously only applied for i > 0, but ALL layers have hidden_dim -> hidden_dim,
+            # so dimensionality always matches. Skipping the first layer caused vanishing gradients.
+            x = x + x_residual
 
         node_embeddings = x  # [num_nodes, hidden_dim]
 
@@ -167,24 +174,22 @@ class GCNPolicy(nn.Module):
         graph_embedding = global_mean_pool(node_embeddings, batch)  # [batch_size, hidden_dim]
 
         # Process global features
-        # Handle different global_features formats
         if hasattr(data, 'global_features'):
-            if global_features.dim() == 1:
-                # Single dimension tensor - could be single graph or concatenated batch
-                if batch_size == 1:
-                    # Single graph case
-                    global_features = global_features.unsqueeze(0)  # [1, global_features_dim]
-                else:
-                    # Batched case: PyG concatenates, so [5] + [5] = [10] for 2 graphs
-                    # We need to reshape to [batch_size, global_features_dim]
-                    total_dim = global_features.size(0)
-                    global_features_dim = total_dim // batch_size
-                    global_features = global_features.view(batch_size, global_features_dim)
-            elif global_features.dim() == 2:
-                # Already properly shaped [batch_size, global_features_dim]
-                pass
+            # global_features should be [batch_size, global_features_dim]
+            # (graph_wrapper ensures each graph stores it as [1, dim])
+            gf = data.global_features
+            if gf.dim() == 1:
+                # Fallback: single graph without batch dim
+                gf = gf.unsqueeze(0)
 
-            global_emb = self.global_proj(global_features)  # [batch_size, hidden_dim]
+            # Verify shape consistency
+            if gf.size(0) != batch_size:
+                raise ValueError(
+                    f"Global features batch size mismatch: "
+                    f"got {gf.size(0)}, expected {batch_size}"
+                )
+
+            global_emb = self.global_proj(gf)  # [batch_size, hidden_dim]
             global_emb = F.relu(global_emb)
         else:
             # No global features, use zeros
@@ -192,6 +197,8 @@ class GCNPolicy(nn.Module):
 
         # Concatenate graph embedding and global features for value
         value_input = torch.cat([graph_embedding, global_emb], dim=-1)  # [batch_size, hidden_dim * 2]
+        # FIX: Apply LayerNorm to normalize concatenated inputs before value head
+        value_input = self.value_input_norm(value_input)
         value = self.value_head(value_input)  # [batch_size, 1]
 
         # Generate action logits for each action in the budget

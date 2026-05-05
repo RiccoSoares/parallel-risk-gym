@@ -196,41 +196,63 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
                 self.game_state['territory_troops'][dest] = surviving_troops
 
     def _check_termination(self):
-        """Check if game should terminate and calculate rewards"""
+        """Check if game has ended.
+
+        Returns:
+            terminations: Dict of agent -> bool (True if game naturally ended)
+            truncations: Dict of agent -> bool (True if episode artificially cut off)
+            rewards: Dict of agent -> float (terminal rewards)
+
+        Note: RL semantics distinguish termination (natural game end like victory/elimination)
+        from truncation (artificial cutoff like turn limit). This affects value bootstrapping
+        in algorithms like PPO - terminated states bootstrap with 0, truncated states should
+        bootstrap with V(s') since the game would continue.
+        """
+        no_termination = {a: False for a in self.possible_agents}
+        no_truncation = {a: False for a in self.possible_agents}
+        no_rewards = {a: 0.0 for a in self.possible_agents}
+
         # Count territories per agent
         territory_counts = {}
         for agent_idx, agent in enumerate(self.possible_agents):
             count = np.sum(self.game_state['territory_ownership'] == agent_idx)
             territory_counts[agent] = count
 
-        # Check victory condition (one agent owns all)
+        # Check victory condition (one agent owns all) - TRUE TERMINATION
         for agent, count in territory_counts.items():
             if count == self.map_config.n_territories:
                 terminations = {a: True for a in self.possible_agents}
                 rewards = {a: (1.0 if a == agent else -1.0) for a in self.possible_agents}
-                return terminations, rewards
+                return terminations, no_truncation, rewards
 
-        # Check elimination condition (one agent has 0 territories)
+        # Check elimination condition (one agent has 0 territories) - TRUE TERMINATION
         eliminated = [agent for agent, count in territory_counts.items() if count == 0]
         if eliminated:
             remaining = [a for a in self.possible_agents if a not in eliminated]
             if len(remaining) == 1:
                 terminations = {a: True for a in self.possible_agents}
                 rewards = {a: (1.0 if a == remaining[0] else -1.0) for a in self.possible_agents}
-                return terminations, rewards
+                return terminations, no_truncation, rewards
 
-        # Check turn limit
+        # Check turn limit - TRUNCATION (not termination!)
+        # Neutral rewards (0, 0) - incentives come from shaped rewards during gameplay:
+        # - Territory conquest (+0.1) rewards attacking
+        # - Territory loss (-0.08) punishes being captured
+        # - This avoids perverse incentives where agents play defensively to avoid turn limit penalties
         if self.game_state['turn_number'] >= self.max_turns:
-            terminations = {a: True for a in self.possible_agents}
-            winner = max(territory_counts, key=territory_counts.get)
-            rewards = {a: (0.5 if a == winner else -0.5) for a in self.possible_agents}
-            return terminations, rewards
+            truncations = {a: True for a in self.possible_agents}
+            rewards = {a: 0.0 for a in self.possible_agents}
+            return no_termination, truncations, rewards
 
         # Game continues
-        return {a: False for a in self.possible_agents}, {a: 0.0 for a in self.possible_agents}
+        return no_termination, no_truncation, no_rewards
 
     def step(self, actions):
         """Process one turn of parallel actions"""
+        # Capture pre-step state for reward shaping (conquest detection)
+        if self.reward_shaper is not None:
+            self.reward_shaper.begin_step(self.game_state)
+
         # Calculate income for each agent based on region control
         for agent in self.agents:
             self.game_state['available_income'][agent] = self._calculate_income(agent)
@@ -281,9 +303,8 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
             infos[agent]['controlled_regions'] = self._check_region_control(agent)
             infos[agent]['income'] = self._calculate_income(agent)
 
-        # Check termination conditions
-        terminations, terminal_rewards = self._check_termination()
-        truncations = {agent: False for agent in self.possible_agents}
+        # Check termination and truncation conditions
+        terminations, truncations, terminal_rewards = self._check_termination()
 
         # Compute rewards (shaped + terminal)
         rewards = {agent: 0.0 for agent in self.possible_agents}
@@ -305,7 +326,9 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
                 infos[agent]['reward_components'] = reward_components[agent]
 
         # Add terminal rewards (scaled if shaper is enabled)
-        if any(terminations.values()):
+        # Terminal rewards apply for both true termination AND truncation (turn limit)
+        episode_ended = any(terminations.values()) or any(truncations.values())
+        if episode_ended:
             if self.reward_shaper is not None:
                 terminal_rewards = self.reward_shaper.scale_terminal_rewards(terminal_rewards)
 
@@ -315,14 +338,13 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
         # Generate observations for remaining agents
         observations = {agent: self._get_observation(agent) for agent in self.agents}
 
-        # If game ended, ensure both agents get terminations
-        if any(terminations.values()):
+        # If game ended (either terminated or truncated), clear agents list
+        if episode_ended:
             self.agents = []
-            terminations['__all__'] = True
-        else:
-            terminations['__all__'] = False
 
-        truncations['__all__'] = False
+        # Set __all__ flags correctly
+        terminations['__all__'] = any(terminations.values())
+        truncations['__all__'] = any(truncations.values())
 
         return observations, rewards, terminations, truncations, infos
 

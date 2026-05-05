@@ -2,9 +2,10 @@
 
 env:
   map_name: "simple_6"
-  max_turns: 100
+  max_turns: 50  # Reduced from 100 to force aggressive play
   action_budget: 5
   seed: null  # Set to integer for reproducibility
+  use_reward_shaping: true  # Enable dense reward shaping (conquest, territory control, etc.)
 
 model:
   type: "gcn"
@@ -14,13 +15,13 @@ model:
 
 training:
   num_workers: 4           # Parallel environments (not yet implemented)
-  batch_size: 1024         # Environment steps per update
+  batch_size: 4096         # Environment steps per update (increased from 1024 for stability)
   num_epochs: 10           # SGD epochs per batch
-  learning_rate: 3.0e-4
+  learning_rate: 1.0e-4    # Reduced from 3e-4 for more stable updates
   gamma: 0.99              # Discount factor
   gae_lambda: 0.95         # GAE lambda
   clip_epsilon: 0.2        # PPO clip parameter
-  entropy_coeff: 0.01      # Entropy bonus
+  entropy_coeff: 0.01      # Entropy bonus (reverted from 0.05 to match successful Phase 1 RLlib config)
   value_loss_coeff: 0.5    # Value loss coefficient
   max_grad_norm: 0.5       # Gradient clipping
   use_gpu: false           # Use GPU if available
