@@ -1,0 +1,12 @@
+{
+  "win_rate": 0.58,
+  "loss_rate": 0.42,
+  "draw_rate": 0.0,
+  "wins": 29,
+  "losses": 21,
+  "draws": 0,
+  "total_episodes": 50,
+  "avg_episode_length": 28.0,
+  "std_episode_length": 15.504837954651444,
+  "note": "Empirical baseline - two masked random agents with autoregressive masking"
+}

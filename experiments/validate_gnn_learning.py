@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 
-def run_training(config_path, num_iterations, checkpoint_dir, verbose=True, parallel=False, num_workers=4):
+def run_training(config_path, num_iterations, checkpoint_dir, verbose=True, parallel=False, num_workers=4, checkpoint_interval=10):
     """Run GNN+PPO training."""
     print("\n" + "="*70)
     print("STEP 1: Training GNN+PPO Agent")
@@ -31,6 +31,7 @@ def run_training(config_path, num_iterations, checkpoint_dir, verbose=True, para
     if verbose:
         print(f"Training for {num_iterations} iterations")
         print(f"Checkpoints will be saved to: {checkpoint_dir}")
+        print(f"Checkpoint interval: {checkpoint_interval}")
         if parallel:
             print(f"Using parallel training with {num_workers} workers")
         print("This will take approximately 30-60 minutes...\n")
@@ -59,7 +60,7 @@ def run_training(config_path, num_iterations, checkpoint_dir, verbose=True, para
     # Train
     try:
         if parallel:
-            trainer.train(num_iterations, checkpoint_interval=10)
+            trainer.train(num_iterations, checkpoint_interval=checkpoint_interval)
             trainer.vec_env.close()
         else:
             trainer.train(num_iterations)
@@ -94,7 +95,7 @@ def discover_checkpoints(checkpoint_dir):
 
 
 def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
-    """Evaluate a GNN checkpoint against random agent."""
+    """Evaluate a GNN checkpoint against masked random agent."""
     if verbose:
         print(f"\n  Evaluating checkpoint at iteration {iteration}...")
 
@@ -102,7 +103,7 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
     from parallel_risk.training.torchrl.graph_wrapper import GraphObservationWrapper
     from parallel_risk.models.gnn_gcn import GCNPolicy
     from parallel_risk.models.action_decoder import ActionDecoder
-    from parallel_risk.agents.random_agent import RandomAgent
+    from parallel_risk.agents.masked_random_agent import MaskedRandomAgent
     from torch_geometric.data import Batch
 
     # Load checkpoint
@@ -133,21 +134,16 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
     policy.load_state_dict(checkpoint['policy_state_dict'])
     policy.eval()
 
-    # Create action decoder with action masking disabled (must match training)
+    # Create action decoder (uses autoregressive masking automatically)
     action_decoder = ActionDecoder(
         action_budget=config['env'].get('action_budget', 5),
         max_troops=20,
-        mask_source=False,
-        mask_dest=False,
-        mask_troops=False,
     )
 
-    # Create random opponent
-    n_territories = env.map_config.n_territories
-    random_agent = RandomAgent(
-        n_territories=n_territories,
+    # Create masked random opponent (same masking logic as GNN agent)
+    masked_random_agent = MaskedRandomAgent(
         action_budget=config['env'].get('action_budget', 5),
-        mode='pettingzoo'
+        max_troops=20,
     )
 
     # Run evaluation episodes
@@ -171,7 +167,8 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
                     # Use stochastic sampling to evaluate actual policy distribution
                     # (deterministic=True only takes mode, which can collapse)
                     actions_tensor, _ = action_decoder.decode_actions(
-                        action_logits, batched_graph.batch, deterministic=False
+                        action_logits, batched_graph.batch, deterministic=False,
+                        observations=[graph_0]  # Pass for action masking
                     )
                     action_array = actions_tensor[0].cpu().numpy()
                     action_0 = {
@@ -181,9 +178,10 @@ def evaluate_checkpoint(checkpoint_path, iteration, num_episodes, verbose=True):
             else:
                 action_0 = None
 
-            # Random agent (agent_1) action
+            # Masked random agent (agent_1) action
             if 'agent_1' in obs:
-                action_1 = random_agent.get_action()
+                graph_1 = obs.get('agent_1')
+                action_1 = masked_random_agent.get_action(graph_1)
             else:
                 action_1 = None
 
@@ -453,12 +451,22 @@ def main():
         default=True,
         help="Print detailed output"
     )
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=None,
+        help="Save checkpoint every N iterations (default: same as --eval-interval)"
+    )
 
     args = parser.parse_args()
 
     # Handle output-dir alias
     if args.output_dir:
         args.results_dir = args.output_dir
+
+    # Default checkpoint_interval to eval_interval
+    if args.checkpoint_interval is None:
+        args.checkpoint_interval = args.eval_interval
 
     # Convert to paths
     results_dir = Path(args.results_dir)
@@ -480,6 +488,7 @@ def main():
     print(f"  Results dir:          {results_dir}")
     print(f"  Architecture:         GNN (GCN) + PPO")
     print(f"  Map:                  simple_6")
+    print(f"  Checkpoint interval:  {args.checkpoint_interval}")
     if args.parallel:
         print(f"  Training mode:        Parallel ({args.num_workers} workers)")
     else:
@@ -493,7 +502,8 @@ def main():
             checkpoint_dir,
             verbose=args.verbose,
             parallel=args.parallel,
-            num_workers=args.num_workers
+            num_workers=args.num_workers,
+            checkpoint_interval=args.checkpoint_interval
         )
 
         if not success:

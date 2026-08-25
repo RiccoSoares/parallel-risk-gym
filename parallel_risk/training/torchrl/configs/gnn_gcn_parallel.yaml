@@ -6,7 +6,7 @@ env:
   max_turns: 100  # Reduced to force aggressive play
   action_budget: 5
   seed: null
-  use_reward_shaping: true  # Enable dense rewards for better learning signal
+  use_reward_shaping: false  # Enable dense rewards for better learning signal
 
 model:
   type: "gcn"
