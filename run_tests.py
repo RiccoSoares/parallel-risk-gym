@@ -16,6 +16,7 @@ if __name__ == "__main__":
         "tests/test_combat.py",
         "tests/test_regions.py",
         "tests/test_run.py",
+        "tests/test_maps.py",
     ]
 
     print("Running all tests...\n")

@@ -1,0 +1,32 @@
+# Multi-map GNN training — trains a single GNN across all available maps
+
+env:
+  map_names: ["simple_6", "medium_8", "large_10"]
+  max_turns: 50
+  action_budget: 5
+  seed: null
+  use_reward_shaping: true
+
+model:
+  type: "gcn"
+  hidden_dim: 128
+  num_layers: 3
+  dropout: 0.1
+
+training:
+  num_workers: 4
+  batch_size: 4096
+  num_epochs: 10
+  learning_rate: 1.0e-4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  entropy_coeff: 0.01
+  value_loss_coeff: 0.5
+  max_grad_norm: 0.5
+  use_gpu: false
+
+logging:
+  log_dir: "runs/gnn_multimap"
+  checkpoint_dir: "checkpoints/gnn_multimap"
+  checkpoint_interval: 10

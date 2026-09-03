@@ -115,16 +115,33 @@ class PPOTrainer:
         if env_config.get('use_reward_shaping', True):  # Default to True
             reward_shaping_config = RewardShapingConfig()  # Uses default (all enabled)
 
-        self.env = ParallelRiskEnv(
-            map_name=env_config['map_name'],
-            max_turns=env_config.get('max_turns', 100),
-            seed=env_config.get('seed', None),
-            reward_shaping_config=reward_shaping_config
-        )
-        self.wrapped_env = GraphObservationWrapper(self.env, device=self.device)
+        # Support both map_name (single, backward compat) and map_names (multi-map)
+        if 'map_names' in env_config:
+            map_names = list(env_config['map_names'])
+        elif 'map_name' in env_config:
+            map_names = [env_config['map_name']]
+        else:
+            raise ValueError("env_config must contain either 'map_name' or 'map_names'")
 
-        # Get graph observation info
-        obs_space = self.wrapped_env.observation_space
+        self.map_names = map_names
+
+        # Create one wrapped environment per map
+        self.envs = []
+        for map_name in map_names:
+            _env = ParallelRiskEnv(
+                map_name=map_name,
+                max_turns=env_config.get('max_turns', 100),
+                seed=env_config.get('seed', None),
+                reward_shaping_config=reward_shaping_config
+            )
+            self.envs.append(GraphObservationWrapper(_env, device=self.device))
+
+        # Backward-compat aliases (point to the first environment)
+        self.wrapped_env = self.envs[0]
+        self.env = self.envs[0].env
+
+        # Get graph observation info from first env (same across all maps — all have 3 regions)
+        obs_space = self.envs[0].observation_space
         self.node_features_dim = obs_space['node_features_dim']
         self.global_features_dim = obs_space['global_features_dim']
 
@@ -182,6 +199,7 @@ class PPOTrainer:
         self.global_step = 0
         self.episode_rewards = []
         self.episode_lengths = []
+        self.episode_rewards_per_map = {name: [] for name in self.map_names}
 
     def collect_rollout(self, num_steps: int):
         """
@@ -203,10 +221,16 @@ class PPOTrainer:
             'dones': [],
             'batches': [],  # Batch indices for graph data
             'next_values': [],  # Next state values for GAE (Bug #2 fix: store per-timestep)
+            'map_names': [],  # episode-level list (one entry per completed episode)
         }
 
+        # Randomly pick starting environment (uniform over maps)
+        current_env_idx = np.random.randint(len(self.envs))
+        current_env = self.envs[current_env_idx]
+        current_map_name = self.map_names[current_env_idx]
+
         # Reset environment
-        obs, _ = self.wrapped_env.reset()
+        obs, _ = current_env.reset()
 
         episode_reward = {agent: 0.0 for agent in obs.keys()}
         episode_length = 0
@@ -215,7 +239,10 @@ class PPOTrainer:
         while steps_collected < num_steps:
             # Check if we need to reset (episode ended)
             if len(obs) == 0:
-                obs, _ = self.wrapped_env.reset()
+                current_env_idx = np.random.randint(len(self.envs))
+                current_env = self.envs[current_env_idx]
+                current_map_name = self.map_names[current_env_idx]
+                obs, _ = current_env.reset()
                 episode_reward = {agent: 0.0 for agent in obs.keys()}
                 episode_length = 0
 
@@ -245,7 +272,7 @@ class PPOTrainer:
                 }
 
             # Step environment
-            next_obs, rewards, terminateds, truncateds, infos = self.wrapped_env.step(actions_dict)
+            next_obs, rewards, terminateds, truncateds, infos = current_env.step(actions_dict)
 
             # Track episode stats
             for agent in rewards.keys():
@@ -300,8 +327,17 @@ class PPOTrainer:
                 self.episode_rewards.append(agent_0_reward)
                 self.episode_lengths.append(episode_length)
 
+                # Per-map tracking
+                self.episode_rewards_per_map[current_map_name].append(agent_0_reward)
+                rollout['map_names'].append(current_map_name)
+
+                # Sample new environment (uniform over maps) for next episode
+                current_env_idx = np.random.randint(len(self.envs))
+                current_env = self.envs[current_env_idx]
+                current_map_name = self.map_names[current_env_idx]
+
                 # Reset for next episode
-                obs, _ = self.wrapped_env.reset()
+                obs, _ = current_env.reset()
                 episode_reward = {agent: 0.0 for agent in obs.keys()}
                 episode_length = 0
             else:
@@ -509,7 +545,10 @@ class PPOTrainer:
         """
         print(f"Starting training for {num_iterations} iterations...")
         print(f"Device: {self.device}")
-        print(f"Map: {self.config['env']['map_name']}")
+        if len(self.map_names) == 1:
+            print(f"Map: {self.map_names[0]}")
+        else:
+            print(f"Maps ({len(self.map_names)}): {', '.join(self.map_names)}")
         print(f"Policy: GCN ({self.policy.hidden_dim}x{self.policy.num_layers})")
         print()
 
@@ -531,6 +570,15 @@ class PPOTrainer:
                 print(f"Iteration {iteration+1}/{num_iterations} | "
                       f"Reward: {avg_reward:.3f} | Length: {avg_length:.1f} | "
                       f"Episodes: {len(self.episode_rewards)}")
+
+                # Per-map win rate logging (only when training on multiple maps)
+                if len(self.map_names) > 1:
+                    for map_name in self.map_names:
+                        map_rewards = self.episode_rewards_per_map.get(map_name, [])
+                        if len(map_rewards) > 0:
+                            recent = map_rewards[-10:]
+                            win_rate = float(np.mean([1.0 if r > 0 else 0.0 for r in recent]))
+                            self.writer.add_scalar(f'train/win_rate_{map_name}', win_rate, iteration)
             else:
                 print(f"Iteration {iteration+1}/{num_iterations} | "
                       f"No episodes completed yet | "

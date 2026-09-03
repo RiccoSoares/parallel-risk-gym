@@ -56,7 +56,7 @@ parallel_risk/
 ├── parallel_risk_v0.py       # Entry point (PettingZoo convention)
 └── env/
     ├── parallel_risk_env.py  # Core environment (330 lines)
-    ├── map_config.py         # Map definitions (92 lines)
+    ├── map_config.py         # Map definitions + 3 maps + validation helpers
     ├── combat.py             # Combat resolver (37 lines)
     ├── validators.py         # Action validation (100 lines)
     └── reward_shaping.py     # RL reward shaping (320 lines)
@@ -182,7 +182,8 @@ See `docs/TORCHRL_GNN_GUIDE.md` for Phase 2 details.
 - `ppo_sparse.yaml` - PPO with sparse rewards (alternative config)
 
 **TorchRL (Phase 2):** Edit configs in `parallel_risk/training/torchrl/configs/`:
-- `gnn_gcn.yaml` - GNN with Graph Convolutional Networks
+- `gnn_gcn.yaml` - GNN with Graph Convolutional Networks (single map)
+- `gnn_multimap.yaml` - GNN trained simultaneously on all maps (multi-map generalization)
 
 All configs support customizing:
 - Environment (map, action budget, reward shaping)
@@ -243,32 +244,63 @@ PYTHONPATH=. python experiments/validate_gnn_learning.py --num-iterations 200
 
 Both scripts train the agent, evaluate checkpoints periodically, and generate learning curves.
 
-## Adding New Features
+### Multi-Map Generalization Experiment (Phase 2.4)
+
+Trains a single GNN simultaneously on all maps and tests whether it generalizes:
+
+```bash
+# Quick smoke test (~30 iterations, ~10 minutes)
+PYTHONPATH=. python experiments/multi_map_training.py --quick
+
+# Full experiment (200 iterations, ~1-2 hours)
+PYTHONPATH=. python experiments/multi_map_training.py \
+    --num-iterations 200 \
+    --output-dir experiments/multi_map_results
+```
+
+**Output:** per-map learning curves, final win rates, zero-shot transfer results.
+
+### MCTS vs GNN Comparison
+
+Runs three head-to-head matchups to establish baselines:
+
+```bash
+PYTHONPATH=. python experiments/compare_mcts_gnn.py \
+    --checkpoint checkpoints/best/gnn_gcn_phase2_iter40_wr98.pt \
+    --budget 200 --num-episodes 100 --verbose
+```
+
+### Available Maps
+
+Three maps are registered in `parallel_risk/env/map_config.py`:
+
+| Name | Territories | Topology | Regions |
+|------|-------------|----------|---------|
+| `simple_6` / `basic_6` | 6 | 2×3 grid | north, south, center |
+| `medium_8` | 8 | Bridge (two triangles + chokepoint) | west, bridge, east |
+| `large_10` | 10 | Corridor + flanks (two continents) | north, corridor, south |
+
+All maps pass connectivity, bidirectionality, and region-validity checks. Run `python parallel_risk/env/map_config.py` to validate.
 
 ### Adding a New Map
 
-Edit `parallel_risk/env/map_config.py` only:
+Edit `parallel_risk/env/map_config.py` only. Follow the existing pattern (adjacency_list → adjacency_matrix, initial_ownership, regions, region_bonuses). Include an ASCII layout docstring and call `MapRegistry.register("your_map", create_your_map)` at the bottom.
 
 ```python
-def create_large_10_map():
+def create_my_map():
+    """Map layout:
+    ...ASCII diagram...
+    """
     adjacency_list = {...}
-    regions = {...}
-    region_bonuses = {...}
-    # Build adjacency matrix, initial ownership
+    # ... build adjacency_matrix, initial_ownership, regions, region_bonuses ...
+    return MapConfig(n_territories=N, ...)
 
-    return MapConfig(
-        n_territories=10,
-        adjacency_list=adjacency_list,
-        adjacency_matrix=adjacency_matrix,
-        initial_ownership=initial_ownership,
-        regions=regions,
-        region_bonuses=region_bonuses,
-    )
-
-MapRegistry.register("large_10", create_large_10_map)
+MapRegistry.register("my_map", create_my_map)
 ```
 
-Then use: `env = ParallelRiskEnv(map_name="large_10")`
+Add a smoke-test entry in `tests/test_maps.py` to cover it.
+
+Then use: `env = ParallelRiskEnv(map_name="my_map")`
 
 ### Modifying Combat Rules
 
