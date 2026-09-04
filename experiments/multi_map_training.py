@@ -11,7 +11,6 @@ Usage:
 
 import argparse
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -81,34 +80,32 @@ def build_config(map_names, output_dir, checkpoint_dir, action_budget=5,
 # Evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate_policy_on_map(policy, action_decoder, map_name, action_budget,
-                            num_episodes, seed_offset=0):
+def evaluate_policy_vs_mcts(policy, action_decoder, map_name, action_budget,
+                            num_episodes, mcts_budget=50, seed_offset=0):
     """
-    Evaluate a GNN policy on a specific map against the masked-random baseline.
+    Evaluate a GNN policy (agent_0) vs an MCTS opponent (agent_1) on one map.
+
+    Uses the raw env so MCTS can access env.game_state directly, while the GNN
+    receives agent-relative obs dicts converted to PyG graphs via env_to_graph —
+    exactly the same observation type the policy was trained on.
 
     Policy is set to eval() mode on entry; caller should switch it back to
     train() if training will continue.
-
-    Args:
-        policy: GCNPolicy instance
-        action_decoder: ActionDecoder instance
-        map_name: Map to evaluate on (e.g. 'large_10')
-        action_budget: Number of actions per turn
-        num_episodes: Number of evaluation episodes
-        seed_offset: Seed offset so evaluations on different maps don't collide
 
     Returns:
         dict with win_rate, wins, losses, draws, total_episodes, avg_episode_length
     """
     from parallel_risk import ParallelRiskEnv
-    from parallel_risk.training.torchrl.graph_wrapper import GraphObservationWrapper
-    from parallel_risk.agents.masked_random_agent import MaskedRandomAgent
+    from parallel_risk.agents.mcts_agent import MCTSAgent
+    from parallel_risk.training.torchrl.graph_wrapper import env_to_graph
     from torch_geometric.data import Batch
 
+    device = torch.device('cpu')
     env = ParallelRiskEnv(map_name=map_name, max_turns=50, seed=None,
                           reward_shaping_config=None)
-    wrapped_env = GraphObservationWrapper(env, device=torch.device('cpu'))
-    masked_random = MaskedRandomAgent(action_budget=action_budget, max_troops=20)
+    # Create MCTS once — it is map-specific (holds map_config internally)
+    mcts_agent = MCTSAgent.from_env(env, simulation_budget=mcts_budget,
+                                    action_budget=action_budget)
 
     policy.eval()
 
@@ -116,42 +113,36 @@ def evaluate_policy_on_map(policy, action_decoder, map_name, action_budget,
     episode_lengths = []
 
     for episode in range(num_episodes):
-        obs, _ = wrapped_env.reset(seed=42 + seed_offset + episode)
+        obs, _ = env.reset(seed=42 + seed_offset + episode)
         done = False
         episode_length = 0
 
         while not done:
-            graph_0 = obs.get('agent_0')
-            if graph_0 is not None:
+            actions = {}
+
+            if 'agent_0' in obs:
+                graph = env_to_graph(obs['agent_0'], env.map_config, device)
                 with torch.no_grad():
-                    batched = Batch.from_data_list([graph_0])
+                    batched = Batch.from_data_list([graph])
                     action_logits, _, _ = policy(batched)
                     actions_tensor, _ = action_decoder.decode_actions(
                         action_logits, batched.batch,
-                        deterministic=False, return_log_probs=True,
-                        observations=[graph_0],
+                        deterministic=False, return_log_probs=False,
+                        observations=[graph],
                     )
-                    action_array = actions_tensor[0].cpu().numpy()
-                    action_0 = {
-                        'num_actions': action_budget,
-                        'actions': np.vstack([
-                            action_array,
-                            np.zeros((10 - action_budget, 3)),
-                        ]),
-                    }
-            else:
-                action_0 = None
+                action_array = actions_tensor[0].cpu().numpy()
+                actions['agent_0'] = {
+                    'num_actions': action_budget,
+                    'actions': np.vstack([
+                        action_array,
+                        np.zeros((10 - action_budget, 3)),
+                    ]),
+                }
 
-            action_1 = (masked_random.get_action(obs['agent_1'])
-                        if 'agent_1' in obs else None)
+            if 'agent_1' in obs:
+                actions['agent_1'] = mcts_agent.get_action(env.game_state, 'agent_1')
 
-            actions = {}
-            if action_0 is not None:
-                actions['agent_0'] = action_0
-            if action_1 is not None:
-                actions['agent_1'] = action_1
-
-            obs, rewards, terminateds, truncateds, _ = wrapped_env.step(actions)
+            obs, rewards, terminateds, truncateds, _ = env.step(actions)
             done = (terminateds.get('__all__', False)
                     or truncateds.get('__all__', False))
             episode_length += 1
@@ -183,11 +174,16 @@ def evaluate_policy_on_map(policy, action_decoder, map_name, action_budget,
 
 def train_with_eval(map_names_to_train, num_iterations, eval_interval,
                     num_episodes, output_dir, checkpoint_dir,
-                    label='', verbose=True, batch_size=4096, num_epochs=10):
+                    label='', verbose=True, batch_size=4096, num_epochs=10,
+                    save_weights_path=None, mcts_budget=50):
     """
     Train a multi-map (or single-map) GNN with per-map evaluation at regular
     intervals.  Manages the PPO loop directly so evaluation happens in-memory
     without a checkpoint round-trip.
+
+    Args:
+        save_weights_path: If provided, saves final policy weights (state_dict)
+                           to this path after training completes.
 
     Returns:
         trainer         — PPOTrainer (policy accessible via trainer.policy)
@@ -230,9 +226,10 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
             if verbose:
                 print(f"\n  -- eval @ iter {iteration+1} --")
             for idx, map_name in enumerate(map_names_to_train):
-                result = evaluate_policy_on_map(
+                result = evaluate_policy_vs_mcts(
                     trainer.policy, trainer.action_decoder,
                     map_name, action_budget, num_episodes,
+                    mcts_budget=mcts_budget,
                     seed_offset=idx * 1000,
                 )
                 per_map_win_rates[map_name].append(result['win_rate'])
@@ -251,6 +248,21 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
                       f"avg_reward={avg:+.3f}  episodes={n_ep}")
 
     trainer.writer.close()
+
+    if save_weights_path is not None:
+        save_weights_path = Path(save_weights_path)
+        save_weights_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            'policy_state_dict': trainer.policy.state_dict(),
+            'optimizer_state_dict': trainer.optimizer.state_dict(),
+            'iteration': num_iterations,
+            'config': trainer.config,
+            'map_names': map_names_to_train,
+            'per_map_win_rates': per_map_win_rates,
+            'eval_iterations': eval_iterations,
+        }, save_weights_path)
+        print(f"  Saved weights: {save_weights_path}")
+
     return trainer, per_map_win_rates, eval_iterations
 
 
@@ -260,7 +272,7 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
 
 def run_transfer_test(full_trainer, num_iterations, eval_interval,
                       num_episodes, output_dir, checkpoint_dir, verbose=True,
-                      batch_size=4096, num_epochs=10):
+                      batch_size=4096, num_epochs=10, mcts_budget=50):
     """
     Train a 2-map model (simple_6 + medium_8 only) and compare zero-shot
     performance on large_10 against the already-trained 3-map model.
@@ -287,22 +299,23 @@ def run_transfer_test(full_trainer, num_iterations, eval_interval,
         verbose=verbose,
         batch_size=batch_size,
         num_epochs=num_epochs,
+        mcts_budget=mcts_budget,
     )
 
     action_budget = two_map_trainer.action_budget
 
     print("\n  Evaluating 2-map model on large_10 (zero-shot) ...")
-    result_2map = evaluate_policy_on_map(
+    result_2map = evaluate_policy_vs_mcts(
         two_map_trainer.policy, two_map_trainer.action_decoder,
         'large_10', action_budget, num_episodes * 2,
-        seed_offset=5000,
+        mcts_budget=mcts_budget, seed_offset=5000,
     )
 
     print("  Evaluating 3-map model on large_10 ...")
-    result_3map = evaluate_policy_on_map(
+    result_3map = evaluate_policy_vs_mcts(
         full_trainer.policy, full_trainer.action_decoder,
         'large_10', action_budget, num_episodes * 2,
-        seed_offset=6000,
+        mcts_budget=mcts_budget, seed_offset=6000,
     )
     # Restore training mode (policy will not be trained further, but good practice)
     full_trainer.policy.train()
@@ -508,6 +521,17 @@ def main():
         default='checkpoints/multi_map_training',
         help='Base directory for training checkpoints',
     )
+    parser.add_argument(
+        '--skip-transfer',
+        action='store_true',
+        help='Skip the transfer test (2-map model comparison)',
+    )
+    parser.add_argument(
+        '--mcts-budget',
+        type=int,
+        default=50,
+        help='MCTS simulation budget per move during evaluation',
+    )
     args = parser.parse_args()
 
     if args.quick:
@@ -523,6 +547,7 @@ def main():
         batch_size = 4096
         num_epochs = 10
 
+    mcts_budget = args.mcts_budget
     output_dir = Path(args.output_dir)
     checkpoint_dir = Path(args.checkpoint_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -536,7 +561,9 @@ def main():
     print(f"  Iterations:      {num_iterations}")
     print(f"  Eval interval:   {eval_interval}")
     print(f"  Episodes/map:    {num_episodes}")
+    print(f"  MCTS budget:     {mcts_budget}")
     print(f"  Quick mode:      {args.quick}")
+    print(f"  Skip transfer:   {args.skip_transfer}")
 
     ALL_MAPS = ['simple_6', 'medium_8', 'large_10']
 
@@ -554,6 +581,8 @@ def main():
         verbose=True,
         batch_size=batch_size,
         num_epochs=num_epochs,
+        save_weights_path=checkpoint_dir / 'all_3_maps' / 'final.pt',
+        mcts_budget=mcts_budget,
     )
 
     # Final evaluation on each map with more episodes for stable estimates
@@ -562,10 +591,10 @@ def main():
     print('='*60)
     final_win_rates = {}
     for idx, map_name in enumerate(ALL_MAPS):
-        result = evaluate_policy_on_map(
+        result = evaluate_policy_vs_mcts(
             full_trainer.policy, full_trainer.action_decoder,
             map_name, full_trainer.action_budget, num_episodes * 2,
-            seed_offset=idx * 2000,
+            mcts_budget=mcts_budget, seed_offset=idx * 2000,
         )
         final_win_rates[map_name] = result['win_rate']
         print(f"  {map_name}: {result['win_rate']:.2%}  "
@@ -573,22 +602,7 @@ def main():
     full_trainer.policy.train()
 
     # -----------------------------------------------------------------------
-    # Phase 2: Transfer test
-    # -----------------------------------------------------------------------
-    transfer_results = run_transfer_test(
-        full_trainer=full_trainer,
-        num_iterations=num_iterations,
-        eval_interval=eval_interval,
-        num_episodes=num_episodes,
-        output_dir=output_dir,
-        checkpoint_dir=checkpoint_dir,
-        verbose=True,
-        batch_size=batch_size,
-        num_epochs=num_epochs,
-    )
-
-    # -----------------------------------------------------------------------
-    # Save results JSON
+    # Save phase-1 results and plots immediately (before optional transfer test)
     # -----------------------------------------------------------------------
     results = {
         'experiment': 'multi_map_training',
@@ -597,6 +611,7 @@ def main():
             'num_iterations': num_iterations,
             'eval_interval': eval_interval,
             'num_episodes': num_episodes,
+            'mcts_budget': mcts_budget,
             'quick_mode': args.quick,
             'maps': ALL_MAPS,
             'batch_size': batch_size,
@@ -608,13 +623,7 @@ def main():
         },
         'eval_iterations': eval_iterations,
         'final_win_rates': {k: float(v) for k, v in final_win_rates.items()},
-        'transfer_results': {
-            key: {
-                k: float(v) if isinstance(v, (int, float, np.floating)) else v
-                for k, v in val.items()
-            }
-            for key, val in transfer_results.items()
-        },
+        'transfer_results': None,
     }
 
     results_path = output_dir / 'multi_map_results.json'
@@ -622,10 +631,7 @@ def main():
         json.dump(results, f, indent=2)
     print(f"\nSaved results to: {results_path}")
 
-    # -----------------------------------------------------------------------
-    # Generate plots
-    # -----------------------------------------------------------------------
-    print("\nGenerating plots ...")
+    print("\nGenerating phase-1 plots ...")
     plot_learning_curves(
         per_map_win_rates, eval_iterations,
         output_dir / 'learning_curves.png',
@@ -634,10 +640,36 @@ def main():
         final_win_rates,
         output_dir / 'final_performance.png',
     )
-    plot_transfer_comparison(
-        transfer_results,
-        output_dir / 'transfer_comparison.png',
-    )
+
+    # -----------------------------------------------------------------------
+    # Phase 2: Transfer test (optional)
+    # -----------------------------------------------------------------------
+    if not args.skip_transfer:
+        transfer_results = run_transfer_test(
+            full_trainer=full_trainer,
+            num_iterations=num_iterations,
+            eval_interval=eval_interval,
+            num_episodes=num_episodes,
+            output_dir=output_dir,
+            checkpoint_dir=checkpoint_dir,
+            verbose=True,
+            batch_size=batch_size,
+            num_epochs=num_epochs,
+            mcts_budget=mcts_budget,
+        )
+        results['transfer_results'] = {
+            key: {
+                k: float(v) if isinstance(v, (int, float, np.floating)) else v
+                for k, v in val.items()
+            }
+            for key, val in transfer_results.items()
+        }
+        with open(results_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        plot_transfer_comparison(
+            transfer_results,
+            output_dir / 'transfer_comparison.png',
+        )
 
     # -----------------------------------------------------------------------
     # Summary
@@ -645,22 +677,26 @@ def main():
     print("\n" + "="*60)
     print("EXPERIMENT COMPLETE")
     print("="*60)
-    print("\nFinal 3-map model performance:")
+    print("\nFinal 3-map model performance (vs MCTS):")
     for map_name in ALL_MAPS:
         wr = final_win_rates[map_name]
         tag = "PASS (>50%)" if wr > 0.5 else "below 50%"
         print(f"  {map_name}: {wr:.2%}  [{tag}]")
 
-    print("\nTransfer test — win rate on large_10:")
-    print(f"  2-map model (zero-shot): "
-          f"{transfer_results['2map_on_large10']['win_rate']:.2%}")
-    print(f"  3-map model (trained):   "
-          f"{transfer_results['3map_on_large10']['win_rate']:.2%}")
+    if not args.skip_transfer:
+        print("\nTransfer test — win rate on large_10 (vs MCTS):")
+        print(f"  2-map model (zero-shot): "
+              f"{transfer_results['2map_on_large10']['win_rate']:.2%}")
+        print(f"  3-map model (trained):   "
+              f"{transfer_results['3map_on_large10']['win_rate']:.2%}")
 
     print(f"\nOutputs written to {output_dir}:")
-    for fname in ['multi_map_results.json', 'learning_curves.png',
-                  'final_performance.png', 'transfer_comparison.png']:
+    saved = ['multi_map_results.json', 'learning_curves.png', 'final_performance.png']
+    if not args.skip_transfer:
+        saved.append('transfer_comparison.png')
+    for fname in saved:
         print(f"  {fname}")
+    print(f"  Weights: {checkpoint_dir / 'all_3_maps' / 'final.pt'}")
     print("="*60)
 
 
