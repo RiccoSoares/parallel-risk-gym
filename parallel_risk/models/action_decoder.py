@@ -203,32 +203,32 @@ class ActionDecoder:
         batch_size = actions.size(0)
         action_budget = actions.size(1)
 
+        # Pre-split node-level scores by graph — O(total_nodes) instead of
+        # O(batch_size × total_nodes) for boolean-mask indexing inside the loop.
+        graph_sizes = torch.bincount(batch).tolist()
+
         all_log_probs = []
 
         for action_idx in range(action_budget):
             logits_dict = action_logits[action_idx]
-            source_scores = logits_dict['source']  # [num_nodes]
-            dest_scores = logits_dict['dest']      # [num_nodes]
+            source_scores_by_graph = logits_dict['source'].split(graph_sizes)
+            dest_scores_by_graph = logits_dict['dest'].split(graph_sizes)
             troops_logits = logits_dict['troops']  # [batch_size, max_troops]
 
             batch_log_probs = []
 
             for graph_idx in range(batch_size):
-                # Get nodes belonging to this graph
-                node_mask = (batch == graph_idx)
-                graph_source_scores = source_scores[node_mask]  # [n_territories_i]
-                graph_dest_scores = dest_scores[node_mask]      # [n_territories_i]
-                graph_troops_logits = troops_logits[graph_idx]  # [max_troops]
+                graph_source_scores = source_scores_by_graph[graph_idx]
+                graph_dest_scores = dest_scores_by_graph[graph_idx]
+                graph_troops_logits = troops_logits[graph_idx]
 
-                # Extract action components
-                action = actions[graph_idx, action_idx]  # [3]
+                action = actions[graph_idx, action_idx]
                 source_idx = action[0].long()
                 dest_idx = action[1].long()
                 troops_idx = action[2].long()
 
                 obs = observations[graph_idx] if observations is not None else None
 
-                # Step 1: Source mask (ownership)
                 if obs is not None:
                     source_mask = self._compute_source_mask(obs)
                     masked_source_scores = torch.where(
@@ -239,7 +239,6 @@ class ActionDecoder:
                 else:
                     masked_source_scores = graph_source_scores
 
-                # Step 2: Dest mask (conditioned on actual source choice)
                 if obs is not None:
                     dest_mask = self._compute_dest_mask_for_source(obs, source_idx.item())
                     masked_dest_scores = torch.where(
@@ -250,7 +249,6 @@ class ActionDecoder:
                 else:
                     masked_dest_scores = graph_dest_scores
 
-                # Step 3: Troops mask (conditioned on actual source + dest)
                 if obs is not None:
                     troops_mask = self._compute_troops_mask_for_action(obs, source_idx.item(), dest_idx.item())
                     masked_troops_logits = torch.where(
@@ -261,7 +259,6 @@ class ActionDecoder:
                 else:
                     masked_troops_logits = graph_troops_logits
 
-                # Compute log probabilities
                 source_log_prob = F.log_softmax(masked_source_scores, dim=0)[source_idx]
                 dest_log_prob = F.log_softmax(masked_dest_scores, dim=0)[dest_idx]
                 troops_log_prob = F.log_softmax(masked_troops_logits, dim=0)[troops_idx]
@@ -286,9 +283,10 @@ class ActionDecoder:
 
         Higher entropy = more exploration.
 
-        NOTE: For autoregressive distributions, we compute entropy for each component
-        under its conditional mask. This gives an approximation that's useful for
-        the entropy bonus in PPO, though it's not the true joint entropy.
+        Source entropy is computed with the correct ownership mask.  Destination
+        and troops entropy are approximated without conditioning on the source
+        choice (unmasked), which avoids an O(n_sources × n_dests) inner loop
+        while still providing a useful exploration signal for PPO.
 
         Args:
             action_logits: List of action dicts (length = action_budget)
@@ -300,92 +298,44 @@ class ActionDecoder:
         """
         batch_size = int(batch.max().item()) + 1
 
+        # Pre-split by graph — O(total_nodes) instead of O(batch_size × total_nodes)
+        graph_sizes = torch.bincount(batch).tolist()
+
         all_entropies = []
 
         for action_idx, logits_dict in enumerate(action_logits):
-            source_scores = logits_dict['source']  # [num_nodes]
-            dest_scores = logits_dict['dest']      # [num_nodes]
+            source_by_graph = logits_dict['source'].split(graph_sizes)
+            dest_by_graph = logits_dict['dest'].split(graph_sizes)
             troops_logits = logits_dict['troops']  # [batch_size, max_troops]
 
             batch_entropies = []
 
             for graph_idx in range(batch_size):
-                # Get nodes belonging to this graph
-                node_mask = (batch == graph_idx)
-                graph_source_scores = source_scores[node_mask]  # [n_territories_i]
-                graph_dest_scores = dest_scores[node_mask]      # [n_territories_i]
-                graph_troops_logits = troops_logits[graph_idx]  # [max_troops]
-
                 obs = observations[graph_idx] if observations is not None else None
+                graph_src = source_by_graph[graph_idx]
+                graph_dst = dest_by_graph[graph_idx]
+                graph_troops = troops_logits[graph_idx]
 
-                # Source entropy (with ownership mask)
+                # Source entropy with ownership mask (most important component)
                 if obs is not None:
                     source_mask = self._compute_source_mask(obs)
-                    masked_source_scores = torch.where(
-                        source_mask,
-                        graph_source_scores,
-                        torch.tensor(-1e10, device=graph_source_scores.device, dtype=graph_source_scores.dtype)
+                    masked_src = torch.where(
+                        source_mask, graph_src,
+                        torch.tensor(-1e10, device=graph_src.device, dtype=graph_src.dtype)
                     )
                 else:
-                    masked_source_scores = graph_source_scores
+                    masked_src = graph_src
 
-                source_dist = torch.distributions.Categorical(logits=masked_source_scores)
-                source_entropy = source_dist.entropy()
+                source_entropy = torch.distributions.Categorical(logits=masked_src).entropy()
 
-                # For entropy, we compute expected entropy over dest and troops
-                # by averaging over the source distribution. This is an approximation
-                # but gives a reasonable entropy bonus signal.
-                # For simplicity, we use the average mask across likely sources.
-                source_probs = F.softmax(masked_source_scores, dim=0)
+                # Dest and troops: unmasked approximation (avoids O(n²) loop)
+                dest_entropy = torch.distributions.Categorical(logits=graph_dst).entropy()
+                troops_entropy = torch.distributions.Categorical(logits=graph_troops).entropy()
 
-                # Weighted average dest entropy
-                dest_entropy = torch.tensor(0.0, device=graph_dest_scores.device)
-                troops_entropy = torch.tensor(0.0, device=graph_troops_logits.device)
-
-                for src_idx in range(graph_source_scores.size(0)):
-                    src_prob = source_probs[src_idx]
-                    if src_prob < 1e-6:
-                        continue
-
-                    if obs is not None:
-                        dest_mask = self._compute_dest_mask_for_source(obs, src_idx)
-                        masked_dest_scores = torch.where(
-                            dest_mask,
-                            graph_dest_scores,
-                            torch.tensor(-1e10, device=graph_dest_scores.device, dtype=graph_dest_scores.dtype)
-                        )
-                    else:
-                        masked_dest_scores = graph_dest_scores
-
-                    dest_dist = torch.distributions.Categorical(logits=masked_dest_scores)
-                    dest_entropy = dest_entropy + src_prob * dest_dist.entropy()
-
-                    # For troops, average over dest choices given this source
-                    dest_probs = F.softmax(masked_dest_scores, dim=0)
-                    for dst_idx in range(graph_dest_scores.size(0)):
-                        dst_prob = dest_probs[dst_idx]
-                        if dst_prob < 1e-6:
-                            continue
-
-                        if obs is not None:
-                            troops_mask = self._compute_troops_mask_for_action(obs, src_idx, dst_idx)
-                            masked_troops_logits = torch.where(
-                                troops_mask,
-                                graph_troops_logits,
-                                torch.tensor(-1e10, device=graph_troops_logits.device, dtype=graph_troops_logits.dtype)
-                            )
-                        else:
-                            masked_troops_logits = graph_troops_logits
-
-                        troops_dist = torch.distributions.Categorical(logits=masked_troops_logits)
-                        troops_entropy = troops_entropy + src_prob * dst_prob * troops_dist.entropy()
-
-                # Sum entropies (chain rule approximation)
                 total_entropy = source_entropy + dest_entropy + troops_entropy
                 batch_entropies.append(total_entropy)
 
-            entropies_tensor = torch.stack(batch_entropies)  # [batch_size]
-            all_entropies.append(entropies_tensor)
+            all_entropies.append(torch.stack(batch_entropies))
 
         entropies = torch.stack(all_entropies, dim=1)  # [batch_size, action_budget]
         return entropies
