@@ -9,7 +9,11 @@ Usage:
 
 import argparse
 import os
+import time
 import yaml
+import multiprocessing as mp
+from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Any
 from datetime import datetime
@@ -26,6 +30,212 @@ from parallel_risk.env.reward_shaping import RewardShapingConfig
 from parallel_risk.training.torchrl.graph_wrapper import GraphObservationWrapper, env_to_graph
 from parallel_risk.models.gnn_gcn import GCNPolicy
 from parallel_risk.models.action_decoder import ActionDecoder
+
+
+# ---------------------------------------------------------------------------
+# TimingRecorder — no-op unless .enabled is True. Used by --profile mode.
+# ---------------------------------------------------------------------------
+
+class TimingRecorder:
+    """
+    Records per-section wall-clock. When the trainer's device is CUDA,
+    synchronizes before/after so kernel time is measured, not launch time.
+    Disabled by default (zero overhead); flip `.enabled = True` to start recording.
+    """
+
+    def __init__(self, device: torch.device = None):
+        self.enabled = False
+        self.device = device
+        self._sums = defaultdict(float)
+        self._counts = defaultdict(int)
+
+    def reset(self):
+        self._sums.clear()
+        self._counts.clear()
+
+    @contextmanager
+    def section(self, name: str):
+        if not self.enabled:
+            yield
+            return
+        cuda = self.device is not None and self.device.type == 'cuda'
+        if cuda:
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            if cuda:
+                torch.cuda.synchronize()
+            dt = time.perf_counter() - t0
+            self._sums[name] += dt
+            self._counts[name] += 1
+
+    def summary(self) -> Dict[str, Dict[str, float]]:
+        return {
+            name: {
+                'total_s': self._sums[name],
+                'count': self._counts[name],
+                'avg_ms': (self._sums[name] / self._counts[name]) * 1000.0
+                          if self._counts[name] else 0.0,
+            }
+            for name in sorted(self._sums.keys())
+        }
+
+
+# ---------------------------------------------------------------------------
+# Parallel rollout worker — module-level so it is picklable by multiprocessing
+# ---------------------------------------------------------------------------
+
+def _rollout_worker(args):
+    """
+    Collect environment steps in a separate process.
+
+    Returns a partial rollout dict with the same keys as PPOTrainer.collect_rollout,
+    but carrying raw PyG Data objects (picklable) rather than pre-batched Batch
+    objects.  The caller is responsible for re-batching before calling
+    update_policy.
+    """
+    (policy_state_dict, model_kwargs, env_configs, action_budget,
+     num_steps, base_seed) = args
+
+    import torch
+    import numpy as np
+    from torch_geometric.data import Batch as _Batch
+    from parallel_risk import ParallelRiskEnv
+    from parallel_risk.env.reward_shaping import RewardShapingConfig
+    from parallel_risk.training.torchrl.graph_wrapper import GraphObservationWrapper
+    from parallel_risk.models.gnn_gcn import GCNPolicy as _GCNPolicy
+    from parallel_risk.models.action_decoder import ActionDecoder as _ActionDecoder
+
+    device = torch.device('cpu')
+
+    # Reconstruct policy from state dict
+    policy = _GCNPolicy(**model_kwargs).to(device)
+    policy.load_state_dict(policy_state_dict)
+    policy.eval()
+    action_decoder = _ActionDecoder(action_budget=action_budget, max_troops=20)
+
+    # Build wrapped environments (one per map)
+    envs = []
+    map_names = []
+    for ecfg in env_configs:
+        reward_shaping_config = RewardShapingConfig() if ecfg.get('use_reward_shaping') else None
+        raw_env = ParallelRiskEnv(
+            map_name=ecfg['map_name'],
+            max_turns=ecfg.get('max_turns', 50),
+            seed=ecfg.get('seed'),
+            reward_shaping_config=reward_shaping_config,
+        )
+        envs.append(GraphObservationWrapper(raw_env, device=device))
+        map_names.append(ecfg['map_name'])
+
+    rollout = {
+        'observations': [],
+        'graph_lists': [],
+        'actions': [],
+        'rewards': [],
+        'values': [],
+        'log_probs': [],
+        'dones': [],
+        'batches': [],
+        'next_values': [],
+        'map_names': [],
+        'episode_rewards': [],
+        'episode_lengths': [],
+        'episode_rewards_per_map': {n: [] for n in map_names},
+    }
+
+    rng = np.random.RandomState(base_seed)
+    env_idx = rng.randint(len(envs))
+    current_env = envs[env_idx]
+    current_map_name = map_names[env_idx]
+    obs, _ = current_env.reset(seed=int(base_seed))
+    episode_reward = {agent: 0.0 for agent in obs}
+    episode_length = 0
+    steps_collected = 0
+
+    while steps_collected < num_steps:
+        if len(obs) == 0:
+            env_idx = rng.randint(len(envs))
+            current_env = envs[env_idx]
+            current_map_name = map_names[env_idx]
+            obs, _ = current_env.reset(seed=int(base_seed + steps_collected))
+            episode_reward = {agent: 0.0 for agent in obs}
+            episode_length = 0
+
+        graphs = [obs[agent] for agent in sorted(obs.keys())]
+        batched_graph = _Batch.from_data_list(graphs)
+
+        with torch.no_grad():
+            action_logits, values, _ = policy(batched_graph)
+
+        actions_tensor, log_probs = action_decoder.decode_actions(
+            action_logits, batched_graph.batch,
+            deterministic=False, return_log_probs=True, observations=graphs,
+        )
+
+        actions_dict = {}
+        for i, agent in enumerate(sorted(obs.keys())):
+            action_array = actions_tensor[i].cpu().numpy()
+            actions_dict[agent] = {
+                'num_actions': action_budget,
+                'actions': np.vstack([action_array,
+                                      np.zeros((10 - action_budget, 3))]),
+            }
+
+        next_obs, rewards, terminateds, truncateds, _ = current_env.step(actions_dict)
+
+        for agent in rewards:
+            episode_reward[agent] = episode_reward.get(agent, 0.0) + rewards[agent]
+        episode_length += 1
+
+        done = terminateds.get('__all__', False) or truncateds.get('__all__', False)
+        is_terminated = terminateds.get('__all__', False)
+        agent_keys = [k for k in sorted(rewards.keys()) if k != '__all__']
+
+        if is_terminated:
+            next_value = torch.zeros(len(agent_keys), device=device)
+        else:
+            next_graphs = [next_obs[agent] for agent in sorted(next_obs.keys())]
+            if next_graphs:
+                next_batched = _Batch.from_data_list(next_graphs)
+                with torch.no_grad():
+                    _, nv, _ = policy(next_batched)
+                    next_value = nv.squeeze(-1)
+            else:
+                next_value = torch.zeros(len(agent_keys), device=device)
+
+        rollout['observations'].append(batched_graph)
+        rollout['graph_lists'].append(graphs)
+        rollout['actions'].append(actions_tensor)
+        rollout['rewards'].append(torch.tensor(
+            [rewards[agent] for agent in agent_keys], device=device))
+        rollout['values'].append(values.squeeze(-1))
+        rollout['log_probs'].append(log_probs)
+        rollout['dones'].append(torch.tensor(
+            [done for _ in agent_keys], dtype=torch.bool, device=device))
+        rollout['batches'].append(batched_graph.batch)
+        rollout['next_values'].append(next_value)
+        steps_collected += 1
+
+        if done:
+            rollout['episode_rewards'].append(episode_reward.get('agent_0', 0.0))
+            rollout['episode_lengths'].append(episode_length)
+            rollout['map_names'].append(current_map_name)
+            rollout['episode_rewards_per_map'][current_map_name].append(
+                episode_reward.get('agent_0', 0.0))
+
+            env_idx = rng.randint(len(envs))
+            current_env = envs[env_idx]
+            current_map_name = map_names[env_idx]
+            obs, _ = current_env.reset(seed=int(base_seed + steps_collected))
+            episode_reward = {agent: 0.0 for agent in obs}
+            episode_length = 0
+        else:
+            obs = next_obs
+
+    return rollout
 
 
 class RunningMeanStd:
@@ -105,7 +315,15 @@ class PPOTrainer:
             config: Configuration dict with hyperparameters
         """
         self.config = config
-        self.device = torch.device('cuda' if torch.cuda.is_available() and config.get('use_gpu', False) else 'cpu')
+        use_gpu = config.get('training', {}).get('use_gpu', config.get('use_gpu', False))
+        self.device = torch.device('cuda' if torch.cuda.is_available() and use_gpu else 'cpu')
+
+        # Perf knobs for CUDA. TF32 gives large matmul speedup on Ampere+ with
+        # negligible precision cost; cudnn.benchmark picks the fastest conv
+        # kernel per input shape (safe because our shapes are stable per map).
+        if self.device.type == 'cuda':
+            torch.set_float32_matmul_precision('high')
+            torch.backends.cudnn.benchmark = True
 
         # Create environment to get observation/action space info
         env_config = config['env']
@@ -115,16 +333,33 @@ class PPOTrainer:
         if env_config.get('use_reward_shaping', True):  # Default to True
             reward_shaping_config = RewardShapingConfig()  # Uses default (all enabled)
 
-        self.env = ParallelRiskEnv(
-            map_name=env_config['map_name'],
-            max_turns=env_config.get('max_turns', 100),
-            seed=env_config.get('seed', None),
-            reward_shaping_config=reward_shaping_config
-        )
-        self.wrapped_env = GraphObservationWrapper(self.env, device=self.device)
+        # Support both map_name (single, backward compat) and map_names (multi-map)
+        if 'map_names' in env_config:
+            map_names = list(env_config['map_names'])
+        elif 'map_name' in env_config:
+            map_names = [env_config['map_name']]
+        else:
+            raise ValueError("env_config must contain either 'map_name' or 'map_names'")
 
-        # Get graph observation info
-        obs_space = self.wrapped_env.observation_space
+        self.map_names = map_names
+
+        # Create one wrapped environment per map
+        self.envs = []
+        for map_name in map_names:
+            _env = ParallelRiskEnv(
+                map_name=map_name,
+                max_turns=env_config.get('max_turns', 100),
+                seed=env_config.get('seed', None),
+                reward_shaping_config=reward_shaping_config
+            )
+            self.envs.append(GraphObservationWrapper(_env, device=self.device))
+
+        # Backward-compat aliases (point to the first environment)
+        self.wrapped_env = self.envs[0]
+        self.env = self.envs[0].env
+
+        # Get graph observation info from first env (same across all maps — all have 3 regions)
+        obs_space = self.envs[0].observation_space
         self.node_features_dim = obs_space['node_features_dim']
         self.global_features_dim = obs_space['global_features_dim']
 
@@ -182,10 +417,46 @@ class PPOTrainer:
         self.global_step = 0
         self.episode_rewards = []
         self.episode_lengths = []
+        self.episode_rewards_per_map = {name: [] for name in self.map_names}
+
+        # Persistent worker pool — created once to amortize spawn overhead
+        self._worker_pool = None
+
+        # Timing (no-op unless .enabled = True; used by --profile)
+        self.timers = TimingRecorder(device=self.device)
+
+    def _build_worker_args(self, worker_seed: int, steps_each: int):
+        """Build args tuple for _rollout_worker."""
+        model_kwargs = dict(
+            node_features_dim=self.node_features_dim,
+            global_features_dim=self.global_features_dim,
+            hidden_dim=self.policy.hidden_dim,
+            num_layers=self.policy.num_layers,
+            action_budget=self.action_budget,
+            max_troops=20,
+            dropout=self.policy.dropout,
+        )
+        env_config = self.config['env']
+        env_configs = [
+            {
+                'map_name': name,
+                'max_turns': env_config.get('max_turns', 50),
+                'seed': env_config.get('seed'),
+                'use_reward_shaping': env_config.get('use_reward_shaping', True),
+            }
+            for name in self.map_names
+        ]
+        state_dict = {k: v.cpu() for k, v in self.policy.state_dict().items()}
+        return (state_dict, model_kwargs, env_configs, self.action_budget,
+                steps_each, worker_seed)
 
     def collect_rollout(self, num_steps: int):
         """
         Collect experience by running the policy in the environment.
+
+        When num_workers > 1, spawns worker processes to collect episodes in
+        parallel (each worker gets num_steps // num_workers target steps).
+        Workers use independent copies of the current policy weights.
 
         Args:
             num_steps: Number of environment steps to collect
@@ -193,6 +464,77 @@ class PPOTrainer:
         Returns:
             rollout: Dict containing collected experience
         """
+        with self.timers.section('rollout.total'):
+            if self.num_workers > 1:
+                return self._collect_rollout_parallel(num_steps)
+            return self._collect_rollout_sequential(num_steps)
+
+    def _collect_rollout_parallel(self, num_steps: int):
+        """Parallel version: reuses persistent worker pool across iterations."""
+        if self._worker_pool is None:
+            ctx = mp.get_context('spawn')
+            self._worker_pool = ctx.Pool(processes=self.num_workers)
+
+        steps_each = max(1, num_steps // self.num_workers)
+        worker_args = [
+            self._build_worker_args(worker_seed=self.global_step * 100 + w, steps_each=steps_each)
+            for w in range(self.num_workers)
+        ]
+
+        with self.timers.section('rollout.pool_map'):
+            worker_rollouts = self._worker_pool.map(_rollout_worker, worker_args)
+
+        # Merge all worker rollouts into one
+        merged = {
+            'observations': [],
+            'graph_lists': [],
+            'actions': [],
+            'rewards': [],
+            'values': [],
+            'log_probs': [],
+            'dones': [],
+            'batches': [],
+            'next_values': [],
+            'map_names': [],
+        }
+        for wr in worker_rollouts:
+            merged['observations'].extend(wr['observations'])
+            merged['graph_lists'].extend(wr['graph_lists'])
+            merged['actions'].extend(wr['actions'])
+            merged['rewards'].extend(wr['rewards'])
+            merged['values'].extend(wr['values'])
+            merged['log_probs'].extend(wr['log_probs'])
+            merged['dones'].extend(wr['dones'])
+            merged['batches'].extend(wr['batches'])
+            merged['next_values'].extend(wr['next_values'])
+            merged['map_names'].extend(wr['map_names'])
+            # Aggregate episode-level stats into trainer state
+            self.episode_rewards.extend(wr['episode_rewards'])
+            self.episode_lengths.extend(wr['episode_lengths'])
+            for map_name, rewards in wr['episode_rewards_per_map'].items():
+                if map_name in self.episode_rewards_per_map:
+                    self.episode_rewards_per_map[map_name].extend(rewards)
+
+        # Workers build rollouts on CPU (see _rollout_worker). Move everything
+        # to the trainer's device so update_policy runs on GPU when configured.
+        if self.device.type != 'cpu':
+            merged = self._move_rollout_to_device(merged, self.device)
+        return merged
+
+    def _move_rollout_to_device(self, rollout, device):
+        """Move a rollout dict (from CPU workers) onto the trainer's device."""
+        def _mv(x):
+            return x.to(device, non_blocking=True) if hasattr(x, 'to') else x
+        # PyG Batch objects and individual Data objects both support .to()
+        rollout['observations'] = [_mv(b) for b in rollout['observations']]
+        rollout['graph_lists'] = [[_mv(g) for g in gl] for gl in rollout['graph_lists']]
+        for key in ('actions', 'rewards', 'values', 'log_probs',
+                    'dones', 'batches', 'next_values'):
+            rollout[key] = [_mv(t) for t in rollout[key]]
+        return rollout
+
+    def _collect_rollout_sequential(self, num_steps: int):
+        """Original sequential rollout collection (num_workers == 1)."""
         rollout = {
             'observations': [],
             'graph_lists': [],  # Individual graphs for action masking
@@ -203,10 +545,16 @@ class PPOTrainer:
             'dones': [],
             'batches': [],  # Batch indices for graph data
             'next_values': [],  # Next state values for GAE (Bug #2 fix: store per-timestep)
+            'map_names': [],  # episode-level list (one entry per completed episode)
         }
 
+        # Randomly pick starting environment (uniform over maps)
+        current_env_idx = np.random.randint(len(self.envs))
+        current_env = self.envs[current_env_idx]
+        current_map_name = self.map_names[current_env_idx]
+
         # Reset environment
-        obs, _ = self.wrapped_env.reset()
+        obs, _ = current_env.reset()
 
         episode_reward = {agent: 0.0 for agent in obs.keys()}
         episode_length = 0
@@ -215,7 +563,10 @@ class PPOTrainer:
         while steps_collected < num_steps:
             # Check if we need to reset (episode ended)
             if len(obs) == 0:
-                obs, _ = self.wrapped_env.reset()
+                current_env_idx = np.random.randint(len(self.envs))
+                current_env = self.envs[current_env_idx]
+                current_map_name = self.map_names[current_env_idx]
+                obs, _ = current_env.reset()
                 episode_reward = {agent: 0.0 for agent in obs.keys()}
                 episode_length = 0
 
@@ -245,7 +596,7 @@ class PPOTrainer:
                 }
 
             # Step environment
-            next_obs, rewards, terminateds, truncateds, infos = self.wrapped_env.step(actions_dict)
+            next_obs, rewards, terminateds, truncateds, infos = current_env.step(actions_dict)
 
             # Track episode stats
             for agent in rewards.keys():
@@ -300,8 +651,17 @@ class PPOTrainer:
                 self.episode_rewards.append(agent_0_reward)
                 self.episode_lengths.append(episode_length)
 
+                # Per-map tracking
+                self.episode_rewards_per_map[current_map_name].append(agent_0_reward)
+                rollout['map_names'].append(current_map_name)
+
+                # Sample new environment (uniform over maps) for next episode
+                current_env_idx = np.random.randint(len(self.envs))
+                current_env = self.envs[current_env_idx]
+                current_map_name = self.map_names[current_env_idx]
+
                 # Reset for next episode
-                obs, _ = self.wrapped_env.reset()
+                obs, _ = current_env.reset()
                 episode_reward = {agent: 0.0 for agent in obs.keys()}
                 episode_length = 0
             else:
@@ -374,128 +734,111 @@ class PPOTrainer:
         return advantages, returns
 
     def update_policy(self, rollout):
+        """Time-wrapped entry point; see _update_policy_impl for the real work."""
+        with self.timers.section('update.total'):
+            self._update_policy_impl(rollout)
+
+    def _update_policy_impl(self, rollout):
         """
         Update policy using PPO.
 
-        Args:
-            rollout: Collected experience
+        Uses full-batch updates: all T timesteps are batched into a single
+        forward pass per epoch (PyG handles variable-size graphs via batch
+        indices).  This is O(num_epochs) forward passes instead of
+        O(T * num_epochs), giving ~T× speedup on the update step.
         """
-        # Compute advantages with proper per-timestep bootstrapping (Bug #2 fix)
         advantages, returns = self.compute_gae(
             rollout['rewards'],
             rollout['values'],
             rollout['dones'],
-            rollout['next_values']  # Bug #2 fix: pass per-timestep next_values
+            rollout['next_values']
         )
 
-        # Normalize advantages (standard PPO practice, matches RLlib)
-        # This ensures consistent gradient scales regardless of reward magnitude
-        # Note: Only normalize advantages, NOT returns - value network predicts actual returns
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Flatten returns for value loss (unnormalized - value network predicts actual returns)
-        returns_flat = returns.view(-1)
-
-        # Flatten timestep dimension
         T = len(rollout['observations'])
         B = rollout['rewards'][0].size(0)
 
-        # Prepare per-timestep tensors for shuffling
-        advantages_per_timestep = [advantages[t] for t in range(T)]  # List of [B] tensors
-        old_log_probs_per_timestep = [rollout['log_probs'][t].sum(dim=1).detach() for t in range(T)]  # List of [B] tensors
-        returns_per_timestep = [returns[t] for t in range(T)]  # List of [B] tensors
-        old_values_per_timestep = [rollout['values'][t].detach() for t in range(T)]  # Bug #3 fix: store old values for clipping
+        # Pre-stack old values (computed at collection time; detached)
+        old_log_probs_all = torch.stack(
+            [rollout['log_probs'][t].sum(dim=1).detach() for t in range(T)]
+        )  # [T, B]
+        old_values_all = torch.stack(
+            [rollout['values'][t].detach() for t in range(T)]
+        )  # [T, B]
+        all_actions = torch.stack(rollout['actions'])  # [T, B, action_budget, 3]
 
-        # Multiple epochs of SGD with shuffled timesteps
-        # Shuffling reduces overfitting to temporal ordering in small batches
+        # Build mega-batch ONCE: T*B graphs concatenated via PyG batching
+        all_graphs = [g for graph_list in rollout['graph_lists'] for g in graph_list]
+        mega_batch = Batch.from_data_list(all_graphs)
+        all_actions_flat = all_actions.view(T * B, self.action_budget, 3)
+
         for epoch in range(self.num_epochs):
-            # Shuffle timestep indices for this epoch
-            timestep_indices = torch.randperm(T)
+            # ONE forward pass through all T*B graphs
+            with self.timers.section('update.forward_per_epoch'):
+                action_logits, new_values, _ = self.policy(mega_batch)
 
-            # Compute new log probs and values in shuffled order
-            all_new_log_probs = []
-            all_new_values = []
-            all_entropies = []
-            all_advantages = []
-            all_old_log_probs = []
-            all_returns = []
-            all_old_values = []  # Bug #3 fix: track old values
-
-            for idx in timestep_indices:
-                t = idx.item()
-                action_logits, values, _ = self.policy(rollout['observations'][t])
-
-                # Compute log probs for actions taken (pass observations for masking)
-                log_probs = self.action_decoder.compute_log_probs(
+            with self.timers.section('update.log_probs'):
+                new_log_probs = self.action_decoder.compute_log_probs(
                     action_logits,
-                    rollout['actions'][t],
-                    rollout['batches'][t],
-                    observations=rollout['graph_lists'][t]
-                )
+                    all_actions_flat,
+                    mega_batch.batch,
+                    observations=all_graphs,
+                ).sum(dim=1).view(T, B)  # [T, B]
 
-                # Compute entropy (pass observations for masking)
+            with self.timers.section('update.entropy'):
                 entropy = self.action_decoder.compute_entropy(
                     action_logits,
-                    rollout['batches'][t],
-                    observations=rollout['graph_lists'][t]
-                )
+                    mega_batch.batch,
+                    observations=all_graphs,
+                ).mean(dim=1).view(T, B)  # [T, B]
 
-                all_new_log_probs.append(log_probs.sum(dim=1))  # Sum over action_budget
-                all_new_values.append(values.squeeze(-1))
-                all_entropies.append(entropy.mean(dim=1))  # Mean over action_budget
+            new_values_2d = new_values.squeeze(-1).view(T, B)  # [T, B]
 
-                # Gather corresponding old values in same shuffled order
-                all_advantages.append(advantages_per_timestep[t])
-                all_old_log_probs.append(old_log_probs_per_timestep[t])
-                all_returns.append(returns_per_timestep[t])
-                all_old_values.append(old_values_per_timestep[t])  # Bug #3 fix
-
-            new_log_probs_flat = torch.cat(all_new_log_probs)
-            new_values_flat = torch.cat(all_new_values)
-            entropies_flat = torch.cat(all_entropies)
-            advantages_flat = torch.cat(all_advantages)
-            old_log_probs_flat = torch.cat(all_old_log_probs)
-            returns_flat = torch.cat(all_returns)
-            old_values_flat = torch.cat(all_old_values)  # Bug #3 fix
+            # Shuffle timestep order for epoch (reduces temporal correlation)
+            perm = torch.randperm(T)
+            new_lp_flat = new_log_probs[perm].view(-1)
+            new_v_flat = new_values_2d[perm].view(-1)
+            ent_flat = entropy[perm].view(-1)
+            old_lp_flat = old_log_probs_all[perm].view(-1)
+            old_v_flat = old_values_all[perm].view(-1)
+            adv_flat = advantages[perm].view(-1)
+            ret_flat = returns[perm].view(-1)
 
             # PPO policy loss
-            ratio = torch.exp(new_log_probs_flat - old_log_probs_flat)
-            surr1 = ratio * advantages_flat
-            surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages_flat
+            ratio = torch.exp(new_lp_flat - old_lp_flat)
+            surr1 = ratio * adv_flat
+            surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * adv_flat
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            # Value function clipping with separate vf_clip_param (matches RLlib)
-            # Uses larger clip range than policy to allow value network to fit properly
-            value_pred_clipped = old_values_flat + torch.clamp(
-                new_values_flat - old_values_flat, -self.vf_clip_param, self.vf_clip_param
+            # Value function clipping
+            value_pred_clipped = old_v_flat + torch.clamp(
+                new_v_flat - old_v_flat, -self.vf_clip_param, self.vf_clip_param
             )
-            value_loss_unclipped = (new_values_flat - returns_flat) ** 2
-            value_loss_clipped = (value_pred_clipped - returns_flat) ** 2
-            value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+            value_loss = 0.5 * torch.max(
+                (new_v_flat - ret_flat) ** 2,
+                (value_pred_clipped - ret_flat) ** 2,
+            ).mean()
 
-            # Entropy bonus
-            entropy_loss = -entropies_flat.mean()
-
-            # Total loss
+            entropy_loss = -ent_flat.mean()
             loss = policy_loss + self.value_loss_coeff * value_loss + self.entropy_coeff * entropy_loss
 
-            # Gradient step
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-            self.optimizer.step()
+            with self.timers.section('update.backward'):
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            with self.timers.section('update.optimizer_step'):
+                self.optimizer.step()
 
-            # Log
-            if epoch == self.num_epochs - 1:  # Log on last epoch
+            if epoch == self.num_epochs - 1:
                 self.writer.add_scalar('Loss/policy', policy_loss.item(), self.global_step)
                 self.writer.add_scalar('Loss/value', value_loss.item(), self.global_step)
                 self.writer.add_scalar('Loss/entropy', entropy_loss.item(), self.global_step)
                 self.writer.add_scalar('Loss/total', loss.item(), self.global_step)
-                # Log return statistics for monitoring
-                self.writer.add_scalar('Stats/return_mean', returns_flat.mean().item(), self.global_step)
-                self.writer.add_scalar('Stats/return_std', returns_flat.std().item(), self.global_step)
-                # Log value clipping statistics
-                clip_fraction = (torch.abs(new_values_flat - old_values_flat) > self.clip_epsilon).float().mean()
+                returns_flat_log = returns[perm].view(-1)
+                self.writer.add_scalar('Stats/return_mean', returns_flat_log.mean().item(), self.global_step)
+                self.writer.add_scalar('Stats/return_std', returns_flat_log.std().item(), self.global_step)
+                clip_fraction = (torch.abs(new_v_flat - old_v_flat) > self.clip_epsilon).float().mean()
                 self.writer.add_scalar('Stats/value_clip_fraction', clip_fraction.item(), self.global_step)
 
         self.global_step += 1
@@ -509,7 +852,10 @@ class PPOTrainer:
         """
         print(f"Starting training for {num_iterations} iterations...")
         print(f"Device: {self.device}")
-        print(f"Map: {self.config['env']['map_name']}")
+        if len(self.map_names) == 1:
+            print(f"Map: {self.map_names[0]}")
+        else:
+            print(f"Maps ({len(self.map_names)}): {', '.join(self.map_names)}")
         print(f"Policy: GCN ({self.policy.hidden_dim}x{self.policy.num_layers})")
         print()
 
@@ -531,6 +877,15 @@ class PPOTrainer:
                 print(f"Iteration {iteration+1}/{num_iterations} | "
                       f"Reward: {avg_reward:.3f} | Length: {avg_length:.1f} | "
                       f"Episodes: {len(self.episode_rewards)}")
+
+                # Per-map win rate logging (only when training on multiple maps)
+                if len(self.map_names) > 1:
+                    for map_name in self.map_names:
+                        map_rewards = self.episode_rewards_per_map.get(map_name, [])
+                        if len(map_rewards) > 0:
+                            recent = map_rewards[-10:]
+                            win_rate = float(np.mean([1.0 if r > 0 else 0.0 for r in recent]))
+                            self.writer.add_scalar(f'train/win_rate_{map_name}', win_rate, iteration)
             else:
                 print(f"Iteration {iteration+1}/{num_iterations} | "
                       f"No episodes completed yet | "
@@ -549,6 +904,10 @@ class PPOTrainer:
 
         print("\n✅ Training complete!")
         self.writer.close()
+        if self._worker_pool is not None:
+            self._worker_pool.terminate()
+            self._worker_pool.join()
+            self._worker_pool = None
 
 
 def load_config(config_path: str) -> Dict[str, Any]:

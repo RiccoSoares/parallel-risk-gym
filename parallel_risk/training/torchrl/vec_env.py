@@ -16,8 +16,8 @@ from torch_geometric.data import Data
 from parallel_risk import ParallelRiskEnv
 from parallel_risk.env.reward_shaping import RewardShapingConfig
 
-# Use 'spawn' on macOS to avoid fork issues
-if sys.platform == 'darwin':
+# macOS and Windows lack a working forkserver; only Linux has it.
+if sys.platform in ('darwin', 'win32'):
     mp_context = mp.get_context('spawn')
 else:
     mp_context = mp.get_context('forkserver')

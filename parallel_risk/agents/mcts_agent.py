@@ -265,12 +265,17 @@ class DuctMCTS:
         uct_c: float = 1.41,
         pw_alpha: float = 0.5,
         max_rollout_turns: int = 50,
+        value_fn=None,
     ):
         self.sim = simulator
         self.samplers = {'agent_0': action_sampler_0, 'agent_1': action_sampler_1}
         self.uct_c = uct_c
         self.pw_alpha = pw_alpha
         self.max_rollout_turns = max_rollout_turns
+        # Optional neural value function for AlphaZero-style leaf evaluation.
+        # Signature: value_fn(game_state: dict, agent_id: str) -> float
+        # When None, falls back to random rollouts (default MCTS behaviour).
+        self.value_fn = value_fn
 
     def make_root(self, game_state: dict) -> DuctNode:
         """Create root node from current game state."""
@@ -390,7 +395,15 @@ class DuctMCTS:
         return best_key
 
     def _rollout(self, game_state: dict) -> dict:
-        """Random rollout from game_state. Both players use masked random policy."""
+        """Evaluate a leaf node.
+
+        If a value_fn was provided (AlphaZero mode), calls it for a direct
+        neural estimate.  Otherwise runs a random playout (standard MCTS).
+        """
+        if self.value_fn is not None:
+            v = self.value_fn(game_state, 'agent_0')
+            return {'agent_0': v, 'agent_1': -v}
+
         state = RiskSimulator.clone_state(game_state)
         for _ in range(self.max_rollout_turns):
             rewards, done = self.sim._check_terminal(state)
@@ -443,6 +456,7 @@ class MCTSAgent:
         action_budget: int = 5,
         max_troops: int = 20,
         max_turns: int = 100,
+        value_fn=None,
     ):
         from parallel_risk.agents.masked_random_agent import MaskedRandomAgentRLlib
 
@@ -467,10 +481,11 @@ class MCTSAgent:
             uct_c=uct_c,
             pw_alpha=pw_alpha,
             max_rollout_turns=max_rollout_turns,
+            value_fn=value_fn,
         )
 
     @classmethod
-    def from_env(cls, env, simulation_budget: int = 200, **kwargs) -> 'MCTSAgent':
+    def from_env(cls, env, simulation_budget: int = 200, value_fn=None, **kwargs) -> 'MCTSAgent':
         """Create MCTSAgent from a ParallelRiskEnv instance."""
         if hasattr(env, 'env'):
             base_env = env.env
@@ -480,6 +495,7 @@ class MCTSAgent:
             map_config=base_env.map_config,
             simulation_budget=simulation_budget,
             max_turns=base_env.max_turns,
+            value_fn=value_fn,
             **kwargs,
         )
 

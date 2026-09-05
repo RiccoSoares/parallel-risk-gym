@@ -3,44 +3,191 @@ Action decoder for GNN policies.
 
 Converts graph embeddings into Parallel Risk actions.
 
-Challenge: Handle variable-sized graphs (different number of territories)
-in a batched setting.
+Vectorized implementation: all per-graph work is done in one batched
+Categorical over padded [B, max_nodes] tensors. Handles variable graph
+sizes via padding (padded slots get -1e10 logits so softmax weights them
+to zero). The old per-graph-loop implementation lives in
+_action_decoder_legacy.py and is used only by the parity test.
 
 Action format: [source_territory, dest_territory, num_troops]
 """
 
+import math
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
+
 from torch_geometric.data import Batch
+
+
+# Precomputed constants used inside hot decoder loops. Recreating these as
+# torch.tensor() at every call causes CPU→GPU sync each time when the batched
+# graph lives on GPU. _MASK_NEG is a large-but-finite negative used with
+# torch.where(mask, x, _MASK_NEG); staying finite avoids NaN in Categorical
+# when every entry happens to be masked out.
+_LOG1P_100 = math.log1p(100.0)
+_MASK_NEG = -1e10
+
+
+class _BatchGeom:
+    """Cache of geometry derived once per (batch, observations) pair.
+
+    Everything here is invariant across the action_budget slots, so we compute
+    it once outside the outer loop and re-use.
+
+    Fields:
+        B: batch size (number of graphs)
+        max_nodes: max graph size across the batch
+        graph_sizes: [B]  number of nodes per graph
+        ptr: [B+1]        cumulative offsets of nodes per graph
+        local_idx: [total_nodes]  position of each node within its graph
+        node_valid: [B, max_nodes] bool — True where a real node exists
+        arange_B: [B]     cached device arange used for row indexing
+        source_mask_bwn: [B, max_nodes] bool — nodes owned by the agent (or
+                        None when observations is None)
+        adj_bwn2: [B, max_nodes, max_nodes] bool — per-graph adjacency (or None)
+        troops_bwn: [B, max_nodes] long — denormalized troop count per node
+                    (or None)
+        income_b: [B] long — available income per graph (or None)
+    """
+
+    def __init__(self, batch: torch.Tensor, observations, batched_obs):
+        device = batch.device
+        B = int(batch.max().item()) + 1 if batch.numel() > 0 else 0
+        graph_sizes = torch.bincount(batch, minlength=B)  # [B]
+        max_nodes = int(graph_sizes.max().item()) if B > 0 else 0
+
+        ptr = torch.zeros(B + 1, dtype=torch.long, device=device)
+        ptr[1:] = torch.cumsum(graph_sizes, dim=0)
+
+        node_arange_total = torch.arange(batch.size(0), device=device, dtype=torch.long)
+        local_idx = node_arange_total - ptr[:-1][batch]
+
+        cols = torch.arange(max_nodes, device=device, dtype=torch.long)
+        node_valid = cols.unsqueeze(0) < graph_sizes.unsqueeze(1)  # [B, max_nodes]
+
+        arange_B = torch.arange(B, device=device, dtype=torch.long)
+
+        source_mask_bwn = None
+        adj_bwn2 = None
+        troops_bwn = None
+        income_b = None
+
+        # If callers didn't pre-batch, do it internally (fast when graphs
+        # already live on the same device).
+        if batched_obs is None and observations is not None:
+            batched_obs = Batch.from_data_list(list(observations))
+
+        if batched_obs is not None:
+            # Ownership mask — feature column 1 is +1 for own, -1 for enemy.
+            ownership_flat = batched_obs.x[:, 1] == 1  # [total_nodes]
+            source_mask_bwn = torch.zeros((B, max_nodes), dtype=torch.bool, device=device)
+            source_mask_bwn[batch, local_idx] = ownership_flat
+            source_mask_bwn = source_mask_bwn & node_valid
+
+            # Adjacency matrix per graph. edge_index is GLOBAL because
+            # Batch.from_data_list offsets it — convert back to local.
+            ei = batched_obs.edge_index
+            if ei.numel() > 0:
+                edge_src_global = ei[0]
+                edge_dst_global = ei[1]
+                edge_batch = batch[edge_src_global]
+                u_local = edge_src_global - ptr[:-1][edge_batch]
+                v_local = edge_dst_global - ptr[:-1][edge_batch]
+                adj_bwn2 = torch.zeros((B, max_nodes, max_nodes),
+                                       dtype=torch.bool, device=device)
+                adj_bwn2[edge_batch, u_local, v_local] = True
+            else:
+                adj_bwn2 = torch.zeros((B, max_nodes, max_nodes),
+                                       dtype=torch.bool, device=device)
+
+            # Denormalized troops per node.
+            troops_norm_flat = batched_obs.x[:, 0]
+            troops_flat = (torch.exp(troops_norm_flat * _LOG1P_100) - 1).long()
+            troops_bwn = torch.zeros((B, max_nodes), dtype=torch.long, device=device)
+            troops_bwn[batch, local_idx] = troops_flat
+
+            # Income per graph. global_features may be [B, gf] (from Batch) or
+            # [1, gf] (single obs); handle both.
+            gf = batched_obs.global_features
+            if gf.dim() == 1:
+                gf = gf.unsqueeze(0)
+            # After Batch.from_data_list, gf is [B*1, gf_dim] — one row per
+            # graph. Only the first column carries available_income (see
+            # graph_wrapper.env_to_graph).
+            if gf.size(0) == B:
+                income_b = (gf[:, 0] * 20).long()
+            else:
+                # Some callers may have collapsed gf; broadcast single-row.
+                income_b = (gf[0, 0] * 20).long().expand(B).clone()
+
+        self.B = B
+        self.max_nodes = max_nodes
+        self.graph_sizes = graph_sizes
+        self.ptr = ptr
+        self.local_idx = local_idx
+        self.node_valid = node_valid
+        self.arange_B = arange_B
+        self.source_mask_bwn = source_mask_bwn
+        self.adj_bwn2 = adj_bwn2
+        self.troops_bwn = troops_bwn
+        self.income_b = income_b
+        self.device = device
+        self.batch = batch
+
+
+def _pad_node_scores(flat_scores: torch.Tensor, geom: _BatchGeom) -> torch.Tensor:
+    """Scatter [total_nodes] node scores into [B, max_nodes], padding invalid slots with _MASK_NEG."""
+    B, max_nodes = geom.B, geom.max_nodes
+    out = torch.full((B, max_nodes), _MASK_NEG,
+                     device=flat_scores.device, dtype=flat_scores.dtype)
+    out[geom.batch, geom.local_idx] = flat_scores
+    return out
+
+
+def _dest_mask_for(geom: _BatchGeom, source_idx: torch.Tensor) -> torch.Tensor:
+    """[B, max_nodes] bool: valid destinations given a chosen source per graph.
+
+    Valid = the source itself (deploy) OR any adjacent node.
+    """
+    # Gather the adjacency row for each graph's chosen source.
+    dest_valid = geom.adj_bwn2[geom.arange_B, source_idx]  # [B, max_nodes]
+    # Always allow source == dest (deploy).
+    dest_valid = dest_valid.clone()
+    dest_valid[geom.arange_B, source_idx] = True
+    # Padded positions must never be True.
+    return dest_valid & geom.node_valid
+
+
+def _troops_mask_for(geom: _BatchGeom, source_idx: torch.Tensor,
+                     dest_idx: torch.Tensor, max_troops: int) -> torch.Tensor:
+    """[B, max_troops] bool: valid troop counts given chosen (source, dest).
+
+    Deploy (source==dest): 1 .. income
+    Transfer/Attack:        1 .. troops[source] - 1
+    """
+    device = source_idx.device
+    is_deploy = (source_idx == dest_idx)
+    src_troops = geom.troops_bwn[geom.arange_B, source_idx]  # [B]
+    max_avail = torch.where(is_deploy, geom.income_b,
+                            (src_troops - 1).clamp(min=0))  # [B]
+    troops_arange = torch.arange(max_troops, device=device).unsqueeze(0)  # [1, max_troops]
+    return (troops_arange >= 1) & (troops_arange <= max_avail.unsqueeze(1))
 
 
 class ActionDecoder:
     """
     Decode graph embeddings into Parallel Risk actions.
 
-    Handles the complexity of:
-    1. Variable-sized graphs (different number of territories per graph)
-    2. Fixed action budget (N actions per turn)
-    3. Action format: [source, dest, troops]
+    Handles variable-sized graphs (different number of territories per graph)
+    in a batched setting by padding per-graph tensors to max_nodes and using
+    a single Categorical over the padded [B, max_nodes] logits per action slot.
 
-    Uses autoregressive masking: source → dest|source → troops|source,dest
-    This achieves >95% valid actions by conditioning each choice on previous ones.
+    Uses autoregressive masking: source → dest|source → troops|source,dest.
     """
 
-    def __init__(
-        self,
-        action_budget: int = 5,
-        max_troops: int = 20,
-    ):
-        """
-        Initialize action decoder.
-
-        Args:
-            action_budget: Number of actions to output per turn
-            max_troops: Maximum troops per action
-        """
+    def __init__(self, action_budget: int = 5, max_troops: int = 20):
         self.action_budget = action_budget
         self.max_troops = max_troops
 
@@ -51,131 +198,90 @@ class ActionDecoder:
         deterministic: bool = False,
         return_log_probs: bool = False,
         observations: List = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batched_obs: Optional[Batch] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Decode actions from GCN policy logits using autoregressive masking.
-
-        Sampling order: source → dest|source → troops|source,dest
-        Each component is conditioned on previous choices for valid actions.
+        Sample actions from GCN policy logits with autoregressive masking.
 
         Args:
-            action_logits: List of action dicts (length = action_budget)
-                Each dict contains:
-                - 'source': [num_nodes] per-node source scores
-                - 'dest': [num_nodes] per-node dest scores
-                - 'troops': [batch_size, max_troops] troop logits
-            batch: [num_nodes] batch assignment for each node
-            deterministic: If True, use argmax; if False, sample
-            return_log_probs: If True, also return log probabilities
-            observations: List of PyG Data observations (required for masking)
+            action_logits: List of dicts (length = action_budget). Each has
+                'source' [total_nodes], 'dest' [total_nodes], 'troops' [B, max_troops].
+            batch: [total_nodes] batch assignment for each node.
+            deterministic: If True, use argmax; else sample from Categorical.
+            return_log_probs: If True, also return log-prob of chosen actions.
+            observations: List of PyG Data (one per graph). Used to derive
+                ownership/adjacency/troop masks. If None, no masking is applied.
+            batched_obs: Optional pre-built Batch of observations. When provided,
+                skips the internal Batch.from_data_list call (used by trainers
+                that already build the mega-batch).
 
         Returns:
-            actions: [batch_size, action_budget, 3] sampled actions
-            log_probs: [batch_size, action_budget] log probabilities (if requested)
+            actions: [B, action_budget, 3] long tensor.
+            log_probs: [B, action_budget] float tensor (or None).
         """
-        batch_size = int(batch.max().item()) + 1
-        device = batch.device
+        geom = _BatchGeom(batch, observations, batched_obs)
+        B, device = geom.B, geom.device
+        max_nodes = geom.max_nodes
 
         all_actions = []
         all_log_probs = []
 
-        for action_idx, logits_dict in enumerate(action_logits):
-            source_scores = logits_dict['source']  # [num_nodes]
-            dest_scores = logits_dict['dest']      # [num_nodes]
-            troops_logits = logits_dict['troops']  # [batch_size, max_troops]
+        for logits_dict in action_logits:
+            src_scores = _pad_node_scores(logits_dict['source'], geom)  # [B, max_nodes]
+            dst_scores = _pad_node_scores(logits_dict['dest'], geom)    # [B, max_nodes]
+            troops_logits = logits_dict['troops']                        # [B, max_troops]
 
-            # Sample/select actions for each graph in the batch
-            batch_actions = []
-            batch_log_probs = []
+            # Source: apply ownership mask.
+            if geom.source_mask_bwn is not None:
+                src_scores = torch.where(geom.source_mask_bwn, src_scores, _MASK_NEG)
+            else:
+                # No obs → still respect padding.
+                src_scores = torch.where(geom.node_valid, src_scores, _MASK_NEG)
 
-            for graph_idx in range(batch_size):
-                # Get nodes belonging to this graph
-                node_mask = (batch == graph_idx)
-                graph_source_scores = source_scores[node_mask]  # [n_territories_i]
-                graph_dest_scores = dest_scores[node_mask]      # [n_territories_i]
-                graph_troops_logits = troops_logits[graph_idx]  # [max_troops]
+            src_dist = torch.distributions.Categorical(logits=src_scores)
+            if deterministic:
+                source_idx = src_scores.argmax(dim=-1)
+            else:
+                source_idx = src_dist.sample()
+            source_log_prob = src_dist.log_prob(source_idx)
 
-                obs = observations[graph_idx] if observations is not None else None
+            # Dest: apply adjacency-conditioned mask.
+            if geom.adj_bwn2 is not None:
+                dest_valid = _dest_mask_for(geom, source_idx)
+                dst_scores = torch.where(dest_valid, dst_scores, _MASK_NEG)
+            else:
+                dst_scores = torch.where(geom.node_valid, dst_scores, _MASK_NEG)
 
-                # Step 1: Sample source (ownership mask)
-                if obs is not None:
-                    source_mask = self._compute_source_mask(obs)
-                    masked_source_scores = torch.where(
-                        source_mask,
-                        graph_source_scores,
-                        torch.tensor(-1e10, device=graph_source_scores.device, dtype=graph_source_scores.dtype)
-                    )
-                else:
-                    masked_source_scores = graph_source_scores
+            dst_dist = torch.distributions.Categorical(logits=dst_scores)
+            if deterministic:
+                dest_idx = dst_scores.argmax(dim=-1)
+            else:
+                dest_idx = dst_dist.sample()
+            dest_log_prob = dst_dist.log_prob(dest_idx)
 
-                if deterministic:
-                    source_idx = torch.argmax(masked_source_scores)
-                else:
-                    source_dist = torch.distributions.Categorical(logits=masked_source_scores)
-                    source_idx = source_dist.sample()
+            # Troops: apply (source,dest)-conditioned mask.
+            if geom.troops_bwn is not None:
+                troops_mask_bt = _troops_mask_for(geom, source_idx, dest_idx, self.max_troops)
+                troops_logits_masked = torch.where(troops_mask_bt, troops_logits, _MASK_NEG)
+            else:
+                troops_logits_masked = troops_logits
 
-                # Step 2: Sample dest (conditioned on source)
-                if obs is not None:
-                    dest_mask = self._compute_dest_mask_for_source(obs, source_idx.item())
-                    masked_dest_scores = torch.where(
-                        dest_mask,
-                        graph_dest_scores,
-                        torch.tensor(-1e10, device=graph_dest_scores.device, dtype=graph_dest_scores.dtype)
-                    )
-                else:
-                    masked_dest_scores = graph_dest_scores
+            troops_dist = torch.distributions.Categorical(logits=troops_logits_masked)
+            if deterministic:
+                troops_idx = troops_logits_masked.argmax(dim=-1)
+            else:
+                troops_idx = troops_dist.sample()
+            troops_log_prob = troops_dist.log_prob(troops_idx)
 
-                if deterministic:
-                    dest_idx = torch.argmax(masked_dest_scores)
-                else:
-                    dest_dist = torch.distributions.Categorical(logits=masked_dest_scores)
-                    dest_idx = dest_dist.sample()
-
-                # Step 3: Sample troops (conditioned on source + dest)
-                if obs is not None:
-                    troops_mask = self._compute_troops_mask_for_action(obs, source_idx.item(), dest_idx.item())
-                    masked_troops_logits = torch.where(
-                        troops_mask,
-                        graph_troops_logits,
-                        torch.tensor(-1e10, device=graph_troops_logits.device, dtype=graph_troops_logits.dtype)
-                    )
-                else:
-                    masked_troops_logits = graph_troops_logits
-
-                if deterministic:
-                    troops_idx = torch.argmax(masked_troops_logits)
-                else:
-                    troops_dist = torch.distributions.Categorical(logits=masked_troops_logits)
-                    troops_idx = troops_dist.sample()
-
-                # Combine into action
-                action = torch.stack([source_idx, dest_idx, troops_idx])
-                batch_actions.append(action)
-
-                # Compute log probability if requested
-                if return_log_probs:
-                    source_log_prob = F.log_softmax(masked_source_scores, dim=0)[source_idx]
-                    dest_log_prob = F.log_softmax(masked_dest_scores, dim=0)[dest_idx]
-                    troops_log_prob = F.log_softmax(masked_troops_logits, dim=0)[troops_idx]
-                    total_log_prob = source_log_prob + dest_log_prob + troops_log_prob
-                    batch_log_probs.append(total_log_prob)
-
-            # Stack actions for this action slot
-            actions_tensor = torch.stack(batch_actions)  # [batch_size, 3]
-            all_actions.append(actions_tensor)
-
+            all_actions.append(torch.stack([source_idx, dest_idx, troops_idx], dim=-1))  # [B, 3]
             if return_log_probs:
-                log_probs_tensor = torch.stack(batch_log_probs)  # [batch_size]
-                all_log_probs.append(log_probs_tensor)
+                all_log_probs.append(source_log_prob + dest_log_prob + troops_log_prob)  # [B]
 
-        # Stack all actions
-        actions = torch.stack(all_actions, dim=1)  # [batch_size, action_budget, 3]
-
+        actions = torch.stack(all_actions, dim=1)  # [B, action_budget, 3]
         if return_log_probs:
-            log_probs = torch.stack(all_log_probs, dim=1)  # [batch_size, action_budget]
+            log_probs = torch.stack(all_log_probs, dim=1)  # [B, action_budget]
             return actions, log_probs
-        else:
-            return actions, None
+        return actions, None
 
     def compute_log_probs(
         self,
@@ -183,274 +289,125 @@ class ActionDecoder:
         actions: torch.Tensor,
         batch: torch.Tensor,
         observations: List = None,
+        batched_obs: Optional[Batch] = None,
     ) -> torch.Tensor:
         """
-        Compute log probabilities for given actions using autoregressive masking.
+        Log-prob of the given actions under the autoregressive-masked distribution.
 
-        CRITICAL: Uses the same autoregressive masks as decode_actions() to ensure
-        correct PPO ratios. Each action's log prob is computed under the distribution
-        that was conditioned on the actual choices made.
-
-        Args:
-            action_logits: List of action dicts (length = action_budget)
-            actions: [batch_size, action_budget, 3] actions to evaluate
-            batch: [num_nodes] batch assignment for each node
-            observations: List of PyG Data observations (required for masking)
-
-        Returns:
-            log_probs: [batch_size, action_budget] log probabilities
+        Same masking pipeline as decode_actions; the difference is we gather
+        log-probs at the passed source/dest/troops indices instead of sampling.
         """
-        batch_size = actions.size(0)
-        action_budget = actions.size(1)
+        geom = _BatchGeom(batch, observations, batched_obs)
+        B, device = geom.B, geom.device
 
+        action_budget = actions.size(1)
         all_log_probs = []
 
         for action_idx in range(action_budget):
             logits_dict = action_logits[action_idx]
-            source_scores = logits_dict['source']  # [num_nodes]
-            dest_scores = logits_dict['dest']      # [num_nodes]
-            troops_logits = logits_dict['troops']  # [batch_size, max_troops]
+            src_scores = _pad_node_scores(logits_dict['source'], geom)
+            dst_scores = _pad_node_scores(logits_dict['dest'], geom)
+            troops_logits = logits_dict['troops']
 
-            batch_log_probs = []
+            source_idx = actions[:, action_idx, 0].long()
+            dest_idx   = actions[:, action_idx, 1].long()
+            troops_idx = actions[:, action_idx, 2].long()
 
-            for graph_idx in range(batch_size):
-                # Get nodes belonging to this graph
-                node_mask = (batch == graph_idx)
-                graph_source_scores = source_scores[node_mask]  # [n_territories_i]
-                graph_dest_scores = dest_scores[node_mask]      # [n_territories_i]
-                graph_troops_logits = troops_logits[graph_idx]  # [max_troops]
+            if geom.source_mask_bwn is not None:
+                src_scores = torch.where(geom.source_mask_bwn, src_scores, _MASK_NEG)
+            else:
+                src_scores = torch.where(geom.node_valid, src_scores, _MASK_NEG)
 
-                # Extract action components
-                action = actions[graph_idx, action_idx]  # [3]
-                source_idx = action[0].long()
-                dest_idx = action[1].long()
-                troops_idx = action[2].long()
+            source_log_prob = F.log_softmax(src_scores, dim=-1).gather(
+                1, source_idx.unsqueeze(1)).squeeze(1)  # [B]
 
-                obs = observations[graph_idx] if observations is not None else None
+            if geom.adj_bwn2 is not None:
+                dest_valid = _dest_mask_for(geom, source_idx)
+                dst_scores = torch.where(dest_valid, dst_scores, _MASK_NEG)
+            else:
+                dst_scores = torch.where(geom.node_valid, dst_scores, _MASK_NEG)
 
-                # Step 1: Source mask (ownership)
-                if obs is not None:
-                    source_mask = self._compute_source_mask(obs)
-                    masked_source_scores = torch.where(
-                        source_mask,
-                        graph_source_scores,
-                        torch.tensor(-1e10, device=graph_source_scores.device, dtype=graph_source_scores.dtype)
-                    )
-                else:
-                    masked_source_scores = graph_source_scores
+            dest_log_prob = F.log_softmax(dst_scores, dim=-1).gather(
+                1, dest_idx.unsqueeze(1)).squeeze(1)  # [B]
 
-                # Step 2: Dest mask (conditioned on actual source choice)
-                if obs is not None:
-                    dest_mask = self._compute_dest_mask_for_source(obs, source_idx.item())
-                    masked_dest_scores = torch.where(
-                        dest_mask,
-                        graph_dest_scores,
-                        torch.tensor(-1e10, device=graph_dest_scores.device, dtype=graph_dest_scores.dtype)
-                    )
-                else:
-                    masked_dest_scores = graph_dest_scores
+            if geom.troops_bwn is not None:
+                troops_mask_bt = _troops_mask_for(geom, source_idx, dest_idx, self.max_troops)
+                troops_logits_masked = torch.where(troops_mask_bt, troops_logits, _MASK_NEG)
+            else:
+                troops_logits_masked = troops_logits
 
-                # Step 3: Troops mask (conditioned on actual source + dest)
-                if obs is not None:
-                    troops_mask = self._compute_troops_mask_for_action(obs, source_idx.item(), dest_idx.item())
-                    masked_troops_logits = torch.where(
-                        troops_mask,
-                        graph_troops_logits,
-                        torch.tensor(-1e10, device=graph_troops_logits.device, dtype=graph_troops_logits.dtype)
-                    )
-                else:
-                    masked_troops_logits = graph_troops_logits
+            troops_log_prob = F.log_softmax(troops_logits_masked, dim=-1).gather(
+                1, troops_idx.unsqueeze(1)).squeeze(1)  # [B]
 
-                # Compute log probabilities
-                source_log_prob = F.log_softmax(masked_source_scores, dim=0)[source_idx]
-                dest_log_prob = F.log_softmax(masked_dest_scores, dim=0)[dest_idx]
-                troops_log_prob = F.log_softmax(masked_troops_logits, dim=0)[troops_idx]
+            all_log_probs.append(source_log_prob + dest_log_prob + troops_log_prob)
 
-                total_log_prob = source_log_prob + dest_log_prob + troops_log_prob
-                batch_log_probs.append(total_log_prob)
-
-            log_probs_tensor = torch.stack(batch_log_probs)  # [batch_size]
-            all_log_probs.append(log_probs_tensor)
-
-        log_probs = torch.stack(all_log_probs, dim=1)  # [batch_size, action_budget]
-        return log_probs
+        return torch.stack(all_log_probs, dim=1)  # [B, action_budget]
 
     def compute_entropy(
         self,
         action_logits: List[Dict[str, torch.Tensor]],
         batch: torch.Tensor,
         observations: List = None,
+        batched_obs: Optional[Batch] = None,
     ) -> torch.Tensor:
         """
-        Compute entropy of action distributions using autoregressive masking.
+        Entropy of the action distribution per slot per graph.
 
-        Higher entropy = more exploration.
-
-        NOTE: For autoregressive distributions, we compute entropy for each component
-        under its conditional mask. This gives an approximation that's useful for
-        the entropy bonus in PPO, though it's not the true joint entropy.
-
-        Args:
-            action_logits: List of action dicts (length = action_budget)
-            batch: [num_nodes] batch assignment for each node
-            observations: List of PyG Data observations (required for masking)
-
-        Returns:
-            entropy: [batch_size, action_budget] entropy values
+        Approximation preserved from the legacy path: source entropy uses the
+        ownership mask; dest and troops entropy are computed unmasked. This
+        avoids an O(n_sources × n_dests) coupling while still providing a
+        useful exploration signal for PPO's entropy bonus.
         """
-        batch_size = int(batch.max().item()) + 1
+        geom = _BatchGeom(batch, observations, batched_obs)
 
         all_entropies = []
 
-        for action_idx, logits_dict in enumerate(action_logits):
-            source_scores = logits_dict['source']  # [num_nodes]
-            dest_scores = logits_dict['dest']      # [num_nodes]
-            troops_logits = logits_dict['troops']  # [batch_size, max_troops]
+        for logits_dict in action_logits:
+            src_scores = _pad_node_scores(logits_dict['source'], geom)
+            dst_scores = _pad_node_scores(logits_dict['dest'], geom)
+            troops_logits = logits_dict['troops']
 
-            batch_entropies = []
+            if geom.source_mask_bwn is not None:
+                src_scores = torch.where(geom.source_mask_bwn, src_scores, _MASK_NEG)
+            else:
+                src_scores = torch.where(geom.node_valid, src_scores, _MASK_NEG)
 
-            for graph_idx in range(batch_size):
-                # Get nodes belonging to this graph
-                node_mask = (batch == graph_idx)
-                graph_source_scores = source_scores[node_mask]  # [n_territories_i]
-                graph_dest_scores = dest_scores[node_mask]      # [n_territories_i]
-                graph_troops_logits = troops_logits[graph_idx]  # [max_troops]
+            # For dest/troops we keep the "unmasked" approximation, but we
+            # STILL respect the padding mask on the node-level scores — the
+            # legacy version only ever saw real nodes, so it never assigned
+            # probability to padded slots. Applying node_valid keeps parity.
+            dst_scores_unmasked = torch.where(geom.node_valid, _pad_node_scores(
+                logits_dict['dest'], geom), _MASK_NEG)
 
-                obs = observations[graph_idx] if observations is not None else None
+            source_entropy = torch.distributions.Categorical(logits=src_scores).entropy()
+            dest_entropy   = torch.distributions.Categorical(logits=dst_scores_unmasked).entropy()
+            troops_entropy = torch.distributions.Categorical(logits=troops_logits).entropy()
 
-                # Source entropy (with ownership mask)
-                if obs is not None:
-                    source_mask = self._compute_source_mask(obs)
-                    masked_source_scores = torch.where(
-                        source_mask,
-                        graph_source_scores,
-                        torch.tensor(-1e10, device=graph_source_scores.device, dtype=graph_source_scores.dtype)
-                    )
-                else:
-                    masked_source_scores = graph_source_scores
+            all_entropies.append(source_entropy + dest_entropy + troops_entropy)
 
-                source_dist = torch.distributions.Categorical(logits=masked_source_scores)
-                source_entropy = source_dist.entropy()
+        return torch.stack(all_entropies, dim=1)  # [B, action_budget]
 
-                # For entropy, we compute expected entropy over dest and troops
-                # by averaging over the source distribution. This is an approximation
-                # but gives a reasonable entropy bonus signal.
-                # For simplicity, we use the average mask across likely sources.
-                source_probs = F.softmax(masked_source_scores, dim=0)
-
-                # Weighted average dest entropy
-                dest_entropy = torch.tensor(0.0, device=graph_dest_scores.device)
-                troops_entropy = torch.tensor(0.0, device=graph_troops_logits.device)
-
-                for src_idx in range(graph_source_scores.size(0)):
-                    src_prob = source_probs[src_idx]
-                    if src_prob < 1e-6:
-                        continue
-
-                    if obs is not None:
-                        dest_mask = self._compute_dest_mask_for_source(obs, src_idx)
-                        masked_dest_scores = torch.where(
-                            dest_mask,
-                            graph_dest_scores,
-                            torch.tensor(-1e10, device=graph_dest_scores.device, dtype=graph_dest_scores.dtype)
-                        )
-                    else:
-                        masked_dest_scores = graph_dest_scores
-
-                    dest_dist = torch.distributions.Categorical(logits=masked_dest_scores)
-                    dest_entropy = dest_entropy + src_prob * dest_dist.entropy()
-
-                    # For troops, average over dest choices given this source
-                    dest_probs = F.softmax(masked_dest_scores, dim=0)
-                    for dst_idx in range(graph_dest_scores.size(0)):
-                        dst_prob = dest_probs[dst_idx]
-                        if dst_prob < 1e-6:
-                            continue
-
-                        if obs is not None:
-                            troops_mask = self._compute_troops_mask_for_action(obs, src_idx, dst_idx)
-                            masked_troops_logits = torch.where(
-                                troops_mask,
-                                graph_troops_logits,
-                                torch.tensor(-1e10, device=graph_troops_logits.device, dtype=graph_troops_logits.dtype)
-                            )
-                        else:
-                            masked_troops_logits = graph_troops_logits
-
-                        troops_dist = torch.distributions.Categorical(logits=masked_troops_logits)
-                        troops_entropy = troops_entropy + src_prob * dst_prob * troops_dist.entropy()
-
-                # Sum entropies (chain rule approximation)
-                total_entropy = source_entropy + dest_entropy + troops_entropy
-                batch_entropies.append(total_entropy)
-
-            entropies_tensor = torch.stack(batch_entropies)  # [batch_size]
-            all_entropies.append(entropies_tensor)
-
-        entropies = torch.stack(all_entropies, dim=1)  # [batch_size, action_budget]
-        return entropies
+    # ------------------------------------------------------------------
+    # Backward-compat helpers (some external callers may still use these).
+    # ------------------------------------------------------------------
 
     def _compute_source_mask(self, observation) -> torch.Tensor:
-        """Compute source territory mask from observation.
-
-        Args:
-            observation: PyG Data object with node features
-
-        Returns:
-            Boolean mask [n_territories] where True = owned by agent
-        """
-        # Extract ownership from node features
-        # Node features: [troops_norm, ownership, in_degree, region_one_hot...]
-        # ownership is at index 1
-        ownership = observation.x[:, 1]  # [n_territories]
-
-        # ownership == 1 means owned by this agent
+        ownership = observation.x[:, 1]
         return ownership == 1
 
     def _compute_dest_mask_for_source(self, observation, source_idx: int) -> torch.Tensor:
-        """Compute destination mask conditioned on chosen source.
-
-        Valid destinations are:
-        - The source itself (for deploy actions)
-        - Territories adjacent to the source (for transfer/attack)
-
-        Args:
-            observation: PyG Data object
-            source_idx: Index of the chosen source territory
-
-        Returns:
-            Boolean mask [n_territories] where True = valid destination
-        """
         n_territories = observation.num_nodes
         edge_index = observation.edge_index
-
         dest_mask = torch.zeros(n_territories, dtype=torch.bool, device=observation.x.device)
-
-        # Deploy: source == dest
         dest_mask[source_idx] = True
-
-        # Transfer/Attack: adjacent territories
         neighbors = edge_index[1, edge_index[0] == source_idx]
         dest_mask[neighbors] = True
-
         return dest_mask
 
     def _compute_troops_mask_for_action(self, observation, source_idx: int, dest_idx: int) -> torch.Tensor:
-        """Compute troops mask conditioned on chosen source and destination.
-
-        Args:
-            observation: PyG Data object
-            source_idx: Index of the chosen source territory
-            dest_idx: Index of the chosen destination territory
-
-        Returns:
-            Boolean mask [max_troops] where True = valid troop count
-        """
-        # Denormalize troops from log-scaled features
         troops_norm = observation.x[:, 0]
-        troops = (torch.exp(troops_norm * torch.log1p(torch.tensor(100.0, device=troops_norm.device))) - 1).long()
+        troops = (torch.exp(troops_norm * _LOG1P_100) - 1).long()
 
-        # Get income from global features
         gf = observation.global_features
         if gf.dim() == 2:
             income_norm = gf[0, 0]
@@ -459,18 +416,13 @@ class ActionDecoder:
         income = (income_norm * 20).long()
 
         if source_idx == dest_idx:
-            # Deploy action: limited by income
             max_troops_available = int(income.item())
         else:
-            # Transfer/Attack: limited by source troops (must leave 1)
             max_troops_available = max(0, int(troops[source_idx].item()) - 1)
 
-        # Create mask
         mask = torch.zeros(self.max_troops, dtype=torch.bool, device=observation.x.device)
         if max_troops_available > 0:
-            # Troops are 1-indexed (troop count 1 to max_troops_available)
             mask[1:min(max_troops_available + 1, self.max_troops)] = True
-
         return mask
 
 
@@ -487,15 +439,13 @@ def convert_to_env_format(actions: torch.Tensor) -> Dict[str, any]:
     """
     batch_size, action_budget, _ = actions.shape
 
-    # For single graph (batch_size = 1), return single agent format
     if batch_size == 1:
-        actions_np = actions[0].cpu().numpy()  # [action_budget, 3]
-        return tuple(actions_np)  # RLlib expects tuple of actions
+        actions_np = actions[0].cpu().numpy()
+        return tuple(actions_np)
 
-    # For batched graphs, return list
     env_actions = []
     for i in range(batch_size):
-        actions_np = actions[i].cpu().numpy()  # [action_budget, 3]
+        actions_np = actions[i].cpu().numpy()
         env_actions.append(tuple(actions_np))
 
     return env_actions

@@ -1,14 +1,15 @@
 # RL Training Roadmap
 
-**Last Updated:** 2026-04-21  
-**Status:** Phase 1 Complete, Phase 2 Complete (Steps 1-3)
+**Last Updated:** 2026-09-03  
+**Status:** Phase 1 Complete ✓ | Phase 2 Complete ✓ | MCTS Complete ✓ | Phase 3 (AlphaZero) In Progress
 
 ## Overview
 
 This document outlines the plan to enable reinforcement learning training on the Parallel Risk environment. The approach is designed to:
-1. Establish baseline training capability with standard architectures
-2. Transition to graph-based observations for multi-map flexibility
-3. Support research-grade experimentation and publication
+1. Establish baseline training capability with standard architectures ✓
+2. Transition to graph-based observations for multi-map flexibility ✓
+3. Implement MCTS for a strong tree-search baseline ✓
+4. Combine MCTS + GNN in an AlphaZero-style loop for the strongest possible agent
 
 ## Strategic Considerations
 
@@ -26,6 +27,13 @@ This document outlines the plan to enable reinforcement learning training on the
 - Future-proofs architecture for arbitrary map topologies
 - Research contribution: GNN architectures for turn-based strategy games
 
+**Phase 3: AlphaZero-Style Training**
+- Combines MCTS tree search with a learned GNN value/policy network
+- MCTS generates high-quality training data (state → policy distribution + value)
+- GNN learns to approximate MCTS outputs, then guides search via PUCT
+- Iterative improvement: better GNN → better search → better training data
+- Enables strong play without the compute cost of deep search at inference
+
 ### Graph-Based Observations: Key Motivations
 
 **Current Challenge:** Fixed-size observation spaces only work for a single map size.
@@ -41,535 +49,180 @@ This document outlines the plan to enable reinforcement learning training on the
 - TorchRL + PyTorch Geometric → flexible for custom GNN architectures
 - Requires custom batching for variable-sized graphs
 
-## Phase 1: Baseline Training (4-6 weeks)
+---
 
-### Objectives
-- Prove the environment is learnable by RL agents
-- Establish baseline performance metrics
-- Validate reward shaping effectiveness
-- Get self-play infrastructure working
+## Phase 1: Baseline Training — COMPLETE ✓
 
-### Step 1: Reward Shaping (Week 1-2)
+### Step 1: Reward Shaping — COMPLETE ✓
+- `parallel_risk/env/reward_shaping.py` with 4 configurable components
+- Preset configurations (dense, sparse, territorial, aggressive)
+- Tests: `tests/test_reward_shaping.py` (8/8 passing)
+- Documentation: `docs/REWARD_SHAPING.md`
 
-**Current State:** Sparse rewards (+1 win, -1 loss, 0 otherwise)
-- Too delayed for effective learning
-- No intermediate signal for progress
-- Hard to learn from rare victories
+### Step 2: RLlib Integration — COMPLETE ✓
+- `parallel_risk/training/rllib/` wrapper, training script, YAML configs
+- Fixed-budget action space, self-play configuration
+- Tests: `tests/test_rllib_wrapper.py` (7/7 passing)
+- Documentation: `docs/RLLIB_INTEGRATION.md`
 
-**Proposed Shaped Rewards:**
+### Step 3: Evaluation Harness — COMPLETE ✓
+- `parallel_risk/evaluation/` with `evaluate_agent`, `league_evaluator`, `visualize`, `league_visualize`
+- Validation experiments: `experiments/validate_learning.py`, `experiments/self_play_league.py`
 
-1. **Territory Control Reward**
-   ```python
-   territory_percentage = owned_territories / total_territories
-   reward += alpha * territory_percentage
-   ```
-   - Dense signal every step
-   - Correlates with winning
-   - Risk: might incentivize passive territorial holding
+### Step 4: Baseline Experiments — COMPLETE ✓
+- **Result:** 100% win rate vs random by iteration 60
+- Learning curves in `experiments/phase1_learning_results/`
+- Self-play league results in `experiments/league_results/`
 
-2. **Region Completion Bonus**
-   ```python
-   for region in completed_regions:
-       reward += beta * region_bonus_value
-   ```
-   - Encourages strategic play (capturing full regions)
-   - Aligned with game mechanics (region bonuses = more troops)
-   - One-time bonus when region is completed
+---
 
-3. **Troop Advantage Reward**
-   ```python
-   troop_ratio = my_total_troops / (enemy_total_troops + 1)
-   reward += gamma * troop_ratio
-   ```
-   - Rewards efficient combat and troop management
-   - Risk: might incentivize avoiding combat to preserve troops
+## Phase 2: Graph Neural Networks — COMPLETE ✓
 
-4. **Strategic Territory Bonus**
-   ```python
-   for territory in owned_territories:
-       reward += delta * territory.connectivity_score
-   ```
-   - Rewards controlling well-connected territories
-   - Encourages map control over isolated territories
+### Step 1: Graph Observation Wrapper — COMPLETE ✓
+- `parallel_risk/training/torchrl/graph_wrapper.py`
+- Tests: `tests/test_graph_wrapper.py` (5/5 passing)
 
-**Design Principles:**
-- All shaped rewards must correlate with winning
-- Coefficients (alpha, beta, gamma, delta) should be tunable
-- Terminal win/loss reward (+1/-1) remains dominant
-- Test with ablation studies: which combinations work best?
+### Step 2: GNN Policy Architectures — COMPLETE ✓
+- `parallel_risk/models/gnn_gcn.py` with actor-critic heads
+- `parallel_risk/models/action_decoder.py` with autoregressive masking
+- Tests: `tests/test_gnn_policy.py` (4/4 passing)
 
-**Validation:**
-- Manual play testing: do shaped rewards align with good strategy?
-- Correlation analysis: do high shaped rewards predict wins?
-- Perverse incentive check: can agent exploit shaped rewards without winning?
+### Step 3: TorchRL Training Loop — COMPLETE ✓
+- `parallel_risk/training/torchrl/train.py` with PPO + self-play
+- Rollout collection, GAE, TensorBoard, checkpointing
+- Tests: `tests/test_training.py` (5/5 passing)
 
-**Implementation Location:**
-- Add to `parallel_risk/env/parallel_risk_env.py`
-- Create `RewardShaper` class for modularity
-- Config-driven: enable/disable individual components
-- Separate file: `parallel_risk/env/reward_shaping.py`
+### Step 4: Multi-Map Training & Generalization — IN PROGRESS ▶
 
-### Step 2: RLlib Integration (Week 2-3)
+**Completed sub-tasks:**
+- [x] GNN agent validates at 99.5% win rate vs random (`experiments/phase2_learning_results/`, `experiments/phase2_revalidation/`)
+- [x] Action masking implemented (autoregressive, both RLlib and TorchRL)
 
-**Components:**
+**Remaining:**
+- [ ] Add medium (8-territory) and large (10-territory) maps to `map_config.py`
+- [ ] Update TorchRL training to support multi-map training (sample across maps per rollout)
+- [ ] Multi-map training experiment: train single GNN across all maps
+- [ ] Transfer learning experiment: pre-train on small, zero-shot / fine-tune on large
+- [ ] Measure generalization: agent trained on small maps → how well does it play large maps?
+- [ ] Visual results: learning curves per map, cross-map evaluation heatmap
 
-1. **Environment Wrapper** (`parallel_risk/training/rllib_wrapper.py`)
-   ```python
-   from ray.rllib.env import PettingZooEnv
-   from parallel_risk import ParallelRiskEnv
-   
-   def env_creator(config):
-       return ParallelRiskEnv(
-           map_name=config.get("map_name", "basic_6"),
-           reward_shaping_config=config.get("reward_shaping", {})
-       )
-   ```
+**Success criteria:**
+- [ ] Single GNN agent achieves >80% win rate on all map sizes simultaneously
+- [ ] Agent trained on small maps achieves >50% win rate on unseen large maps without fine-tuning
+- [ ] Convergence speed improves with multi-map pre-training vs. training from scratch per map
 
-2. **Action Space Handling**
-   - Current: Dict with `num_actions` + padded array
-   - Options for RLlib:
-     - **Fixed budget**: Require exactly N actions per turn (simplest)
-     - **Autoregressive**: Sample num_actions, then sample each action (complex)
-     - **Action masking**: Generate all valid actions, mask invalid (large space)
-   
-   **Recommendation:** Start with fixed budget (e.g., 5 actions/turn)
-   - Simplifies learning problem
-   - Still strategically rich
-   - Can relax later if needed
+---
 
-3. **Self-Play Configuration**
-   ```python
-   config = {
-       "multiagent": {
-           "policies": {"main_policy"},
-           "policy_mapping_fn": lambda agent_id: "main_policy",
-           "policies_to_train": ["main_policy"],
-       },
-       "self_play": {
-           "policy_pool_size": 10,  # Keep last N policy versions
-           "win_rate_threshold": 0.7,  # Add to pool if >70% win rate
-       }
-   }
-   ```
+## MCTS Baseline — COMPLETE ✓
 
-4. **Training Script** (`parallel_risk/training/train.py`)
-   - Hyperparameter config (learning rate, batch size, etc.)
-   - Checkpointing and logging
-   - Weights & Biases integration for experiment tracking
+**Decoupled UCT for simultaneous-move games:**
+- `parallel_risk/agents/mcts_agent.py` (full implementation)
+- Experiments: `experiments/validate_mcts.py`, `experiments/compare_mcts_gnn.py`
+- Results: MCTS (budget=200) at 99.5% win rate vs masked-random
+- Results: MCTS vs GNN comparison — see note below
 
-### Step 3: Evaluation Harness (Week 3-4)
+**Note on MCTS vs. GNN comparison:** The available comparison (`experiments/mcts_vs_gnn_results_corrected/`) was run against GNN weights from an earlier training run. The best-known GNN checkpoint was trained afterward. A fair comparison between MCTS and the best GNN remains to be run as part of Phase 3 baseline establishment.
 
-**Standardized Metrics:**
-- Win rate over training (self-play and vs. random/heuristic baselines)
-- Elo rating evolution
-- Average episode length (shorter = more decisive play)
-- Territory control over time
-- Action distribution analysis (deploy vs. transfer vs. attack ratios)
+---
 
-**Tournament System:**
-- Round-robin between checkpoints
-- Head-to-head comparisons
-- Statistical significance testing
+## Phase 3: AlphaZero-Style Training — PLANNED
 
-**Implementation:** `parallel_risk/evaluation/`
-- `tournament.py` - Run matches between policies
-- `metrics.py` - Calculate and log performance metrics
-- `visualize.py` - Plot learning curves and comparisons
+### Motivation
+MCTS provides strong performance via deep search but is expensive at inference (scales with budget). The GNN is fast but weaker than MCTS. AlphaZero-style training bridges this gap: use MCTS to generate high-quality supervision, train the GNN to internalize it, and use the improved GNN to guide future search.
 
-### Step 4: Baseline Experimentation (Week 4-6)
+For a **simultaneous-move** game, we use the **Decoupled UCT** framework already implemented. The AlphaZero loop adapts naturally:
+1. MCTS (with GNN prior) plays self-play games
+2. Root visit distributions become policy targets; outcome is the value target
+3. GNN is trained to predict these targets
+4. Updated GNN replaces prior for next iteration of MCTS
 
-**Experiments to Run:**
-1. **Reward shaping ablation:** Which shaped rewards help most?
-2. **Architecture search:** MLP depth/width, network capacity
-3. **Hyperparameter tuning:** Learning rate, entropy coefficient, GAE lambda
-4. **Self-play dynamics:** Policy pool size, opponent sampling strategy
+### Step 1: Fair MCTS vs. GNN Baseline
+- Run MCTS (budget=200) against best GNN checkpoint on all maps
+- Establish the performance gap that Phase 3 aims to close
+- Visual: Elo comparison chart
 
-**Success Criteria:**
-- Agent consistently beats random baseline (>80% win rate)
-- Agent shows strategic behavior (region completion, efficient combat)
-- Training converges within reasonable time (<24 hours on single GPU)
-- Reproducible results with documented hyperparameters
+### Step 2: MCTS Self-Play Data Generation
+- Implement data generation pipeline: MCTS self-play → `(state, policy_distribution, outcome)` tuples
+- Policy distribution = normalized visit counts at root
+- For simultaneous moves: record both agents' policy distributions per turn
+- Config: number of self-play games, MCTS budget per move, parallelism
 
-**Deliverables:**
-- Trained baseline agent checkpoint
-- Performance benchmarks documented
-- Best reward shaping configuration identified
-- Training recipe (config + hyperparameters)
+### Step 3: GNN Supervised Training
+- Train GNN to predict (policy distribution, value) from state
+- Loss: `L = α * KL(mcts_policy, gnn_policy) + β * MSE(outcome, gnn_value)`
+- Evaluate: does GNN policy start matching MCTS visit distributions?
 
-## Phase 2: Graph Neural Networks (6-8 weeks)
+### Step 4: PUCT-Guided MCTS
+- Replace uniform prior in UCT with GNN policy network (PUCT formula)
+- GNN value network replaces random rollouts for leaf evaluation
+- With learned guidance, MCTS should achieve equivalent quality at lower budget
 
-### Objectives
-- Support multi-map training (6, 10, 20 territory maps simultaneously)
-- Implement and compare GNN architectures
-- Enable transfer learning across map sizes
-- Research publication: "GNNs for Territorial Strategy Games"
+### Step 5: Iterative Self-Play Loop
+- Pipeline: self-play → data collection → GNN update → better prior → repeat
+- Track: GNN standalone win rate, MCTS(GNN) vs MCTS(uniform) at equal budget
+- Termination: convergence in Elo, or fixed number of iterations
 
-### Step 1: Graph Observation Wrapper (Week 1-2)
+### Success Criteria
+- [ ] GNN alone (no search) approaches MCTS(budget=50) performance
+- [ ] MCTS(GNN, budget=50) beats MCTS(uniform, budget=200) — 4× compute efficiency
+- [ ] Self-play loop shows monotonic improvement over iterations
+- [ ] Generalizes: AlphaZero agent trained on small maps transfers to large maps
 
-**Convert Environment Observations to PyTorch Geometric Format:**
+---
 
-```python
-from torch_geometric.data import Data
+## Research Questions
 
-def env_to_graph(obs, map_config):
-    # Node features: [troops, ownership, region_id, in_degree]
-    node_features = torch.tensor([
-        [obs['troops'][i], 
-         obs['ownership'][i],
-         territory_to_region[i],
-         map_config.adjacency_matrix[i].sum()]
-        for i in range(map_config.n_territories)
-    ], dtype=torch.float)
-    
-    # Edge index: adjacency list as COO format
-    edge_index = torch.tensor(
-        map_config.adjacency_list_to_coo(), 
-        dtype=torch.long
-    )
-    
-    # Optional edge features (e.g., strategic value of connection)
-    edge_attr = compute_edge_features(map_config)
-    
-    return Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
-```
+1. Can a single GNN handle 6 to 50 territory maps without retraining? (Phase 2.4)
+2. What is the sample efficiency gain from graph inductive bias?
+3. Does AlphaZero-style training close the gap between GNN and MCTS? (Phase 3)
+4. Do learned PUCT priors produce qualitatively different search trees from uniform UCT?
+5. Does the AlphaZero GNN learn interpretable strategy concepts (attention on chokepoints)?
 
-**Batching Strategy:**
-- PyTorch Geometric handles variable-sized graphs in batches
-- Create DataLoader that samples from multiple map sizes
-- Ensure balanced sampling (don't overtrain on one map size)
-
-**Implementation:** `parallel_risk/training/graph_wrapper.py`
-
-### Step 2: GNN Policy Architectures (Week 2-4)
-
-**Baseline Architectures to Compare:**
-
-1. **Graph Convolutional Network (GCN)**
-   - Simple message passing
-   - Good baseline, easy to implement
-   ```python
-   from torch_geometric.nn import GCNConv
-   
-   class GCNPolicy(nn.Module):
-       def __init__(self, node_features, hidden_dim, num_layers):
-           self.convs = [GCNConv(node_features, hidden_dim)]
-           for _ in range(num_layers - 1):
-               self.convs.append(GCNConv(hidden_dim, hidden_dim))
-           self.action_head = ...
-           self.value_head = ...
-   ```
-
-2. **Graph Attention Network (GAT)**
-   - Learns attention weights for neighbors
-   - Can identify strategic territories automatically
-   ```python
-   from torch_geometric.nn import GATConv
-   
-   class GATPolicy(nn.Module):
-       def __init__(self, node_features, hidden_dim, heads=4):
-           self.convs = [GATConv(node_features, hidden_dim, heads=heads)]
-           # Multi-head attention for neighbor importance
-   ```
-
-3. **GraphSAGE**
-   - Sampling-based aggregation
-   - Scalable to very large graphs
-   - Good for future large-map extensions
-
-**Action Space for GNNs:**
-
-Current action format `[source, dest, troops]` works, but consider:
-- **Node-level actions:** Select source node, then edge (neighbor) for dest
-- **Edge-level actions:** Directly select edges to act on
-- Graph pooling to get graph-level embedding for value function
-
-**Implementation:** `parallel_risk/models/`
-- `gnn_policy.py` - Policy network architectures
-- `action_decoder.py` - Convert graph embeddings to actions
-
-### Step 3: TorchRL Training Loop (Week 4-6)
-
-**Why TorchRL over RLlib:**
-- Better flexibility for custom architectures
-- Native PyTorch integration (works well with PyG)
-- More control over training loop for research
-
-**Components:**
-
-1. **Data Collection:**
-   ```python
-   from torchrl.collectors import MultiaSyncDataCollector
-   from torchrl.envs import ParallelEnv
-   
-   # Collect experience from multiple envs with different maps
-   collector = MultiAsyncDataCollector(
-       create_env_fn=[
-           lambda: GraphParallelRiskEnv(map_name="basic_6"),
-           lambda: GraphParallelRiskEnv(map_name="large_10"),
-       ],
-       policy=gnn_policy,
-       frames_per_batch=2048,
-   )
-   ```
-
-2. **Self-Play System:**
-   - Port logic from Phase 1 RLlib implementation
-   - Policy pool with Elo ratings
-   - Opponent sampling strategy (recent + best + random)
-   - League-based training (inspired by AlphaStar)
-
-3. **PPO Implementation:**
-   ```python
-   from torchrl.objectives import ClipPPOLoss
-   
-   loss_module = ClipPPOLoss(
-       actor_network=gnn_policy,
-       critic_network=gnn_value,
-       clip_epsilon=0.2,
-   )
-   ```
-
-**Implementation:** `parallel_risk/training/torchrl_trainer.py`
-
-### Step 4: Multi-Map Training & Experiments (Week 6-8)
-
-**Experiments:**
-
-1. **Single-Map Training (Baseline)**
-   - Train GCN, GAT, GraphSAGE on basic_6 map only
-   - Compare to Phase 1 MLP baseline
-   - Expected: Similar or slightly better performance
-
-2. **Multi-Map Training**
-   - Train on basic_6 + large_10 simultaneously
-   - Test generalization to unseen map sizes
-   - Expected: Some performance on new maps without retraining
-
-3. **Transfer Learning**
-   - Pre-train on small maps, fine-tune on large
-   - Compare to training large map from scratch
-   - Expected: Faster convergence, better sample efficiency
-
-4. **Architecture Comparison**
-   - GCN vs. GAT vs. GraphSAGE
-   - Ablation: number of layers, hidden dimensions, attention heads
-   - Identify best architecture for this domain
-
-5. **Attention Visualization**
-   - For GAT: visualize learned attention patterns
-   - Do agents learn to focus on strategic territories?
-   - Qualitative analysis for research publication
-
-**Success Criteria:**
-- GNN agent beats MLP baseline on multiple map sizes
-- Transfer learning shows positive transfer (>0% improvement)
-- Agent trained on small maps achieves >50% win rate on unseen large maps
-- Identified best GNN architecture with reproducible results
-
-**Deliverables:**
-- Trained GNN agent checkpoints for all architectures
-- Comparative analysis (tables, plots)
-- Attention visualization and strategic analysis
-- Research paper draft sections (methods, results)
+---
 
 ## Infrastructure & Tooling
 
 ### Experiment Tracking
-**Weights & Biases Integration:**
-- Log all hyperparameters and config
-- Real-time training curves (win rate, loss, rewards)
-- Model checkpoints with version control
-- Comparison dashboards across experiments
+- TensorBoard: training curves
+- Results JSON + matplotlib plots in `experiments/` subdirectories
+- All configs checked into git
 
 ### Reproducibility
 - Fixed random seeds for all experiments
-- Version pinning: Python, PyTorch, RLlib/TorchRL, PyG
-- Docker container for consistent environment
+- Version pinning: Python, PyTorch, TorchRL, PyG
 - All configs checked into git
 
-### Compute Requirements
-**Phase 1 (RLlib):**
-- Single GPU sufficient (e.g., RTX 3090, A100)
-- ~24 hours training time per experiment
-- CPU-only possible but slower
-
-**Phase 2 (GNN):**
-- Single GPU for small experiments
-- Multi-GPU beneficial for large-scale multi-map training
-- TPUs viable for PyTorch Geometric workloads
-
-## Project Structure (Proposed)
-
-```
-parallel_risk/
-├── env/                          # Existing environment code
-│   ├── parallel_risk_env.py
-│   ├── map_config.py
-│   ├── combat.py
-│   ├── validators.py
-│   └── reward_shaping.py         # NEW: Shaped reward implementations
-├── training/                     # NEW: Training infrastructure
-│   ├── rllib_wrapper.py          # Phase 1: RLlib integration
-│   ├── graph_wrapper.py          # Phase 2: PyG graph conversion
-│   ├── train_rllib.py            # Phase 1: Training script
-│   ├── train_torchrl.py          # Phase 2: Training script
-│   └── configs/                  # Hyperparameter configs
-│       ├── baseline_ppo.yaml
-│       ├── gnn_gcn.yaml
-│       └── gnn_gat.yaml
-├── models/                       # NEW: Neural network architectures
-│   ├── mlp_policy.py             # Phase 1: Standard MLP
-│   ├── gnn_policy.py             # Phase 2: GNN policies
-│   └── action_decoder.py         # Action space handling
-├── evaluation/                   # NEW: Evaluation tools
-│   ├── tournament.py             # Head-to-head matches
-│   ├── metrics.py                # Performance metrics
-│   └── visualize.py              # Plotting and analysis
-└── selfplay/                     # NEW: Self-play infrastructure
-    ├── policy_pool.py            # Manage past policy versions
-    ├── matchmaking.py            # Opponent selection
-    └── elo_rating.py             # Elo rating system
-
-docs/
-├── RL_TRAINING_ROADMAP.md        # This document
-├── REWARD_SHAPING.md             # NEW: Reward design details
-└── GNN_ARCHITECTURE.md           # NEW: Phase 2 architecture decisions
-
-experiments/                      # NEW: Experiment logs and results
-├── phase1_baseline/
-│   ├── reward_ablation/
-│   ├── hyperparam_search/
-│   └── best_model/
-└── phase2_gnn/
-    ├── architecture_comparison/
-    ├── multi_map_training/
-    └── transfer_learning/
-```
-
-## Timeline Summary
-
-| Phase | Duration | Key Deliverables |
-|-------|----------|------------------|
-| **Phase 1.1:** Reward Shaping | 1-2 weeks | Shaped reward implementation, validation |
-| **Phase 1.2:** RLlib Integration | 1-2 weeks | Training pipeline, self-play working |
-| **Phase 1.3:** Evaluation | 1 week | Metrics, tournament system |
-| **Phase 1.4:** Baseline Experiments | 2-3 weeks | Trained agent, benchmarks, best config |
-| **Phase 2.1:** Graph Wrapper | 1-2 weeks | PyG conversion, batching |
-| **Phase 2.2:** GNN Architectures | 2 weeks | GCN, GAT, GraphSAGE implementations |
-| **Phase 2.3:** TorchRL Training | 2 weeks | Custom training loop, self-play port |
-| **Phase 2.4:** Multi-Map Experiments | 2-3 weeks | All experiments, paper results |
-| **Total:** | **12-15 weeks** | Full RL training capability + research results |
-
-## Open Questions & Future Decisions
-
-### Phase 1 Decisions Needed:
-1. **Action space simplification:** Fixed budget (how many actions?) vs. autoregressive?
-2. **Reward shaping coefficients:** How to balance alpha, beta, gamma, delta?
-3. **Self-play policy pool size:** 5? 10? 20? Trade-off: diversity vs. compute
-4. **Baseline opponents:** Heuristic agent design for comparisons?
-
-### Phase 2 Decisions Needed:
-1. **Map size curriculum:** Train on small→large progressively or all simultaneously?
-2. **GNN depth:** How many message passing layers? Risk of over-smoothing
-3. **Action decoder design:** Node-level, edge-level, or keep current format?
-4. **Transfer learning protocol:** What's the best pre-train/fine-tune split?
-
-### Research Questions:
-1. Do GNNs learn interpretable strategic concepts (e.g., attention on chokepoints)?
-2. Can a single GNN agent handle 6 to 50 territory maps without retraining?
-3. What's the sample efficiency gain from graph inductive bias?
-4. How does self-play dynamics differ between MLP and GNN agents?
+---
 
 ## Success Metrics
 
-### Phase 1 Success:
-- [ ] Agent beats random baseline >90% win rate
-- [ ] Agent shows strategic behavior (captures regions, efficient combat)
-- [ ] Reproducible training in <24 hours
-- [ ] Documented best practices for reward shaping
+### Phase 1 ✓
+- [x] Agent beats random baseline >90% win rate (achieved 100%)
+- [x] Agent shows strategic behavior (captures regions, efficient combat)
+- [x] Reproducible training in <24 hours
+- [x] Documented best practices for reward shaping
 
-### Phase 2 Success:
-- [ ] GNN agent trains on multiple map sizes
-- [ ] Positive transfer: pre-training helps on new maps
-- [ ] Published-quality results and analysis
-- [ ] Open-sourced model checkpoints and code
+### Phase 2 ✓ (partial)
+- [x] GNN agent trains and achieves 99.5% win rate vs random
+- [x] Action masking implemented
+- [ ] GNN agent trains on multiple map sizes simultaneously
+- [ ] Positive transfer demonstrated: pre-training on small maps helps on large
 
-### Research Impact:
-- [ ] Paper submission to RL conference (e.g., ICLR, NeurIPS)
-- [ ] Benchmark environment for multi-agent GNN research
-- [ ] Reproducible codebase for community use
+### MCTS ✓
+- [x] Decoupled UCT implemented for simultaneous-move games
+- [x] 99.5% win rate vs masked-random at budget=200
+- [ ] Fair comparison against best GNN checkpoint
 
-## Phase 1 Progress
+### Phase 3 (Targets)
+- [ ] Self-play data generation pipeline implemented
+- [ ] GNN supervised on MCTS data shows improved Elo vs. PPO-trained GNN
+- [ ] MCTS(GNN) achieves MCTS(uniform) quality at 4× lower budget
+- [ ] Paper submission to RL conference (ICLR, NeurIPS)
 
-### Completed:
-- [x] **Phase 1.1: Reward Shaping** - Fully implemented with 4 configurable components
-  - Created `parallel_risk/env/reward_shaping.py` with RewardShaper class
-  - Territory control, region completion, troop advantage, strategic position rewards
-  - Preset configurations (dense, sparse, territorial, aggressive)
-  - Unit tests in `tests/test_reward_shaping.py`
-  - Documentation in `docs/REWARD_SHAPING.md`
-
-- [x] **Phase 1.2: RLlib Integration** - Training pipeline ready
-  - Created `parallel_risk/training/rllib_wrapper.py` with fixed-budget action space
-  - Training script `parallel_risk/training/train_rllib.py` with CLI
-  - Configuration system via YAML (`configs/ppo_baseline.yaml`)
-  - Unit tests in `tests/test_rllib_wrapper.py`
-  - Documentation in `docs/RLLIB_INTEGRATION.md`
-
-- [x] **Phase 2.1: Graph Observation Wrapper** - Fully implemented
-  - Created `parallel_risk/training/torchrl/graph_wrapper.py` 
-  - Converts environment observations to PyTorch Geometric format
-  - Handles variable-sized graphs and batching
-  - Test suite in `tests/test_graph_wrapper.py` (5/5 passing)
-
-- [x] **Phase 2.2: GNN Policy Architectures** - Fully implemented
-  - Created `parallel_risk/models/gnn_gcn.py` with actor-critic heads
-  - Created `parallel_risk/models/action_decoder.py` for discrete actions
-  - Handles batched variable-sized graphs
-  - Test suite in `tests/test_gnn_policy.py` (4/4 passing)
-
-- [x] **Phase 2.3: TorchRL Training Loop** - Fully implemented
-  - Created `parallel_risk/training/torchrl/train.py` with PPO + self-play
-  - Rollout collection with episode boundary handling
-  - GAE computation, TensorBoard logging, checkpointing
-  - Test suite in `tests/test_training.py` (5/5 passing)
-  - Successfully runs end-to-end training (validated with 20-iteration run)
-
-### In Progress:
-- **Phase 1.3-1.4 & Phase 2.4: Evaluation & Experiments** - Ready to begin
-  - Phase 2.3 training pipeline complete and bug-free
-  - Next: Validate learning by training GNN for extended iterations
-  - Compare GNN performance to Phase 1 MLP baseline
-  - Future: Multi-map training and transfer learning experiments
-
-## Next Steps
-
-**Immediate:** Phase 2.4 - Validate GNN Learning
-1. Run extended training (500-1000 iterations) with GNN policy
-2. Evaluate trained GNN agent vs random baseline
-3. Plot learning curves (win rate over training)
-4. Verify agent shows strategic behavior
-
-**Short-term:** Compare Phase 1 vs Phase 2
-1. Compare GNN performance to Phase 1 MLP baseline
-2. Measure convergence speed and final win rate
-3. Analyze strategic behavior differences
-
-**Long-term:** Multi-Map Training & Transfer Learning
-1. Train GNN on multiple map sizes simultaneously
-2. Test transfer learning: pre-train on small maps, fine-tune on large
-3. Measure generalization to unseen map sizes
-4. Optional: Implement GAT architecture for comparison
-
-**References for Implementation:**
-- OpenAI Five reward shaping: https://openai.com/research/openai-five
-- AlphaStar self-play: https://deepmind.com/blog/article/alphastar-mastering-real-time-strategy-game-starcraft-ii
-- GNN for games: "Graph Neural Networks for Multi-Agent Systems" (various papers)
-- PyTorch Geometric tutorials: https://pytorch-geometric.readthedocs.io/
+---
 
 ## Revision History
 
-- **2026-04-07:** Initial roadmap created
-  - Two-phase approach: flat→graph observations
-  - Reward shaping as starting point
-  - Timeline: 12-15 weeks total
+- **2026-04-07:** Initial roadmap created — two-phase approach
+- **2026-04-21:** Phase 1 complete, Phase 2 Steps 1-3 complete
+- **2026-09-03:** Phase 2 complete, MCTS complete; updated to reflect Phase 3 AlphaZero goals and Phase 2.4 multi-map as immediate next step
