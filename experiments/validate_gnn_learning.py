@@ -304,7 +304,7 @@ def generate_summary(all_results, results_dir, verbose=True):
     # Generate text summary
     summary_path = results_dir / "final_summary.txt"
 
-    with open(summary_path, 'w') as f:
+    with open(summary_path, 'w', encoding='utf-8') as f:
         f.write("="*70 + "\n")
         f.write("PHASE 2 GNN LEARNING VALIDATION EXPERIMENT\n")
         f.write("="*70 + "\n\n")

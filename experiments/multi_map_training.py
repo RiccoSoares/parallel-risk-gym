@@ -11,6 +11,8 @@ Usage:
 
 import argparse
 import json
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -43,7 +45,7 @@ _GRIDLINE = '#e1e0d9'
 # ---------------------------------------------------------------------------
 
 def build_config(map_names, output_dir, checkpoint_dir, action_budget=5,
-                 batch_size=4096, num_epochs=10):
+                 batch_size=4096, num_epochs=10, num_workers=1, use_gpu=True):
     """Build a PPOTrainer-compatible config dict for the given map list."""
     return {
         'env': {
@@ -62,6 +64,7 @@ def build_config(map_names, output_dir, checkpoint_dir, action_budget=5,
         'training': {
             'batch_size': batch_size,
             'num_epochs': num_epochs,
+            'num_workers': num_workers,
             'learning_rate': 1e-4,
             'gamma': 0.99,
             'gae_lambda': 0.95,
@@ -69,7 +72,7 @@ def build_config(map_names, output_dir, checkpoint_dir, action_budget=5,
             'entropy_coeff': 0.01,
             'value_loss_coeff': 0.5,
             'max_grad_norm': 0.5,
-            'use_gpu': False,
+            'use_gpu': use_gpu,
         },
         'log_dir': str(Path(output_dir) / 'runs'),
         'checkpoint_dir': str(checkpoint_dir),
@@ -169,13 +172,62 @@ def evaluate_policy_vs_mcts(policy, action_decoder, map_name, action_budget,
 
 
 # ---------------------------------------------------------------------------
+# Parallel-eval worker (module-level so it's picklable by ProcessPoolExecutor)
+# ---------------------------------------------------------------------------
+
+def _eval_worker(args):
+    """Rebuild the policy from a CPU state_dict and run evaluate_policy_vs_mcts.
+
+    Runs in a spawned subprocess — everything imported here is duplicated per
+    worker. Kept minimal for spawn cost. The GPU is not touched.
+    """
+    (state_dict_cpu, model_kwargs, map_name, action_budget,
+     num_episodes, mcts_budget, seed_offset) = args
+
+    import torch
+    from parallel_risk.models.gnn_gcn import GCNPolicy
+    from parallel_risk.models.action_decoder import ActionDecoder
+
+    torch.set_num_threads(1)  # avoid oversubscription with sibling workers
+
+    policy = GCNPolicy(**model_kwargs)
+    policy.load_state_dict(state_dict_cpu)
+    policy.eval()
+
+    action_decoder = ActionDecoder(action_budget=action_budget, max_troops=20)
+
+    result = evaluate_policy_vs_mcts(
+        policy, action_decoder, map_name, action_budget,
+        num_episodes, mcts_budget=mcts_budget, seed_offset=seed_offset,
+    )
+    return map_name, result
+
+
+def _snapshot_policy_for_eval(trainer):
+    """Return (state_dict_cpu, model_kwargs) suitable to hand to _eval_worker."""
+    state_dict_cpu = {k: v.detach().cpu()
+                      for k, v in trainer.policy.state_dict().items()}
+    model_kwargs = dict(
+        node_features_dim=trainer.node_features_dim,
+        global_features_dim=trainer.global_features_dim,
+        hidden_dim=trainer.policy.hidden_dim,
+        num_layers=trainer.policy.num_layers,
+        action_budget=trainer.action_budget,
+        max_troops=20,
+        dropout=trainer.policy.dropout,
+    )
+    return state_dict_cpu, model_kwargs
+
+
+# ---------------------------------------------------------------------------
 # Training loop with inline evaluation
 # ---------------------------------------------------------------------------
 
 def train_with_eval(map_names_to_train, num_iterations, eval_interval,
                     num_episodes, output_dir, checkpoint_dir,
                     label='', verbose=True, batch_size=4096, num_epochs=10,
-                    save_weights_path=None, mcts_budget=50):
+                    save_weights_path=None, mcts_budget=50,
+                    num_workers=1, use_gpu=True, parallel_eval=True):
     """
     Train a multi-map (or single-map) GNN with per-map evaluation at regular
     intervals.  Manages the PPO loop directly so evaluation happens in-memory
@@ -198,6 +250,8 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
         checkpoint_dir=checkpoint_dir,
         batch_size=batch_size,
         num_epochs=num_epochs,
+        num_workers=num_workers,
+        use_gpu=use_gpu,
     )
 
     label_str = label or ', '.join(map_names_to_train)
@@ -216,36 +270,71 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
 
     log_every = max(1, num_iterations // 10)
 
-    for iteration in range(num_iterations):
-        # Collect and update — mirrors what PPOTrainer.train() does internally
-        rollout = trainer.collect_rollout(trainer.batch_size // 2)
-        trainer.update_policy(rollout)
+    # Persistent eval executor. One worker per map so all evals run in
+    # parallel. Created lazily on first eval to avoid spawn cost when there
+    # are zero eval intervals.
+    eval_executor = None
+    if parallel_eval and len(map_names_to_train) > 1:
+        eval_executor = ProcessPoolExecutor(
+            max_workers=len(map_names_to_train),
+            mp_context=mp.get_context('spawn'),
+        )
 
-        if (iteration + 1) % eval_interval == 0:
-            eval_iterations.append(iteration + 1)
-            if verbose:
-                print(f"\n  -- eval @ iter {iteration+1} --")
-            for idx, map_name in enumerate(map_names_to_train):
-                result = evaluate_policy_vs_mcts(
-                    trainer.policy, trainer.action_decoder,
-                    map_name, action_budget, num_episodes,
-                    mcts_budget=mcts_budget,
-                    seed_offset=idx * 1000,
-                )
-                per_map_win_rates[map_name].append(result['win_rate'])
+    try:
+        for iteration in range(num_iterations):
+            # Collect and update — mirrors what PPOTrainer.train() does internally
+            rollout = trainer.collect_rollout(trainer.batch_size // 2)
+            trainer.update_policy(rollout)
+
+            if (iteration + 1) % eval_interval == 0:
+                eval_iterations.append(iteration + 1)
                 if verbose:
-                    print(f"    {map_name}: {result['win_rate']:.2%}  "
-                          f"({result['wins']}W/{result['losses']}L/"
-                          f"{result['draws']}D)")
-            # Return policy to training mode for next iteration
-            trainer.policy.train()
+                    print(f"\n  -- eval @ iter {iteration+1} --")
 
-        elif verbose and (iteration + 1) % log_every == 0:
-            if trainer.episode_rewards:
-                avg = np.mean(trainer.episode_rewards[-20:])
-                n_ep = len(trainer.episode_rewards)
-                print(f"  iter {iteration+1:4d}/{num_iterations}  "
-                      f"avg_reward={avg:+.3f}  episodes={n_ep}")
+                if eval_executor is not None:
+                    # Parallel: submit one job per map, wait for all.
+                    state_dict_cpu, model_kwargs = _snapshot_policy_for_eval(trainer)
+                    futures = {}
+                    for idx, map_name in enumerate(map_names_to_train):
+                        args = (state_dict_cpu, model_kwargs, map_name,
+                                action_budget, num_episodes, mcts_budget,
+                                idx * 1000)
+                        futures[map_name] = eval_executor.submit(_eval_worker, args)
+
+                    for map_name in map_names_to_train:
+                        _, result = futures[map_name].result()
+                        per_map_win_rates[map_name].append(result['win_rate'])
+                        if verbose:
+                            print(f"    {map_name}: {result['win_rate']:.2%}  "
+                                  f"({result['wins']}W/{result['losses']}L/"
+                                  f"{result['draws']}D)")
+                else:
+                    # Sequential fallback (single-map runs or --serial-eval).
+                    for idx, map_name in enumerate(map_names_to_train):
+                        result = evaluate_policy_vs_mcts(
+                            trainer.policy, trainer.action_decoder,
+                            map_name, action_budget, num_episodes,
+                            mcts_budget=mcts_budget,
+                            seed_offset=idx * 1000,
+                        )
+                        per_map_win_rates[map_name].append(result['win_rate'])
+                        if verbose:
+                            print(f"    {map_name}: {result['win_rate']:.2%}  "
+                                  f"({result['wins']}W/{result['losses']}L/"
+                                  f"{result['draws']}D)")
+
+                # Return policy to training mode for next iteration
+                trainer.policy.train()
+
+            elif verbose and (iteration + 1) % log_every == 0:
+                if trainer.episode_rewards:
+                    avg = np.mean(trainer.episode_rewards[-20:])
+                    n_ep = len(trainer.episode_rewards)
+                    print(f"  iter {iteration+1:4d}/{num_iterations}  "
+                          f"avg_reward={avg:+.3f}  episodes={n_ep}")
+    finally:
+        if eval_executor is not None:
+            eval_executor.shutdown(wait=True)
 
     trainer.writer.close()
 
@@ -272,7 +361,8 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
 
 def run_transfer_test(full_trainer, num_iterations, eval_interval,
                       num_episodes, output_dir, checkpoint_dir, verbose=True,
-                      batch_size=4096, num_epochs=10, mcts_budget=50):
+                      batch_size=4096, num_epochs=10, mcts_budget=50,
+                      num_workers=1, use_gpu=True, parallel_eval=True):
     """
     Train a 2-map model (simple_6 + medium_8 only) and compare zero-shot
     performance on large_10 against the already-trained 3-map model.
@@ -300,23 +390,32 @@ def run_transfer_test(full_trainer, num_iterations, eval_interval,
         batch_size=batch_size,
         num_epochs=num_epochs,
         mcts_budget=mcts_budget,
+        num_workers=num_workers,
+        use_gpu=use_gpu,
+        parallel_eval=parallel_eval,
     )
 
     action_budget = two_map_trainer.action_budget
 
+    # evaluate_policy_vs_mcts runs on CPU; if either trainer's policy sits on
+    # GPU we need to move it before calling the sequential eval helper.
+    def _eval_cpu(trainer, seed_offset):
+        original_device = trainer.device
+        trainer.policy.to('cpu')
+        try:
+            return evaluate_policy_vs_mcts(
+                trainer.policy, trainer.action_decoder,
+                'large_10', action_budget, num_episodes * 2,
+                mcts_budget=mcts_budget, seed_offset=seed_offset,
+            )
+        finally:
+            trainer.policy.to(original_device)
+
     print("\n  Evaluating 2-map model on large_10 (zero-shot) ...")
-    result_2map = evaluate_policy_vs_mcts(
-        two_map_trainer.policy, two_map_trainer.action_decoder,
-        'large_10', action_budget, num_episodes * 2,
-        mcts_budget=mcts_budget, seed_offset=5000,
-    )
+    result_2map = _eval_cpu(two_map_trainer, seed_offset=5000)
 
     print("  Evaluating 3-map model on large_10 ...")
-    result_3map = evaluate_policy_vs_mcts(
-        full_trainer.policy, full_trainer.action_decoder,
-        'large_10', action_budget, num_episodes * 2,
-        mcts_budget=mcts_budget, seed_offset=6000,
-    )
+    result_3map = _eval_cpu(full_trainer, seed_offset=6000)
     # Restore training mode (policy will not be trained further, but good practice)
     full_trainer.policy.train()
 
@@ -492,6 +591,166 @@ def plot_transfer_comparison(transfer_results, output_path):
 
 
 # ---------------------------------------------------------------------------
+# Profile mode — measure baseline bottlenecks across CPU/GPU × single/multi-map
+# ---------------------------------------------------------------------------
+
+def _run_profile_scenario(name, map_names, use_gpu, num_workers,
+                          output_dir, batch_size, num_epochs, num_warmup, num_timed):
+    """Run one profiling scenario: warm up, then time num_timed iterations."""
+    from parallel_risk.training.torchrl.train import PPOTrainer
+
+    print(f"\n  scenario '{name}': maps={map_names} gpu={use_gpu} workers={num_workers}")
+    if use_gpu and not torch.cuda.is_available():
+        print(f"    [skip: CUDA not available]")
+        return None
+
+    cfg = build_config(
+        map_names=map_names,
+        output_dir=output_dir,
+        checkpoint_dir=Path(output_dir) / f'ckpt_{name}',
+        batch_size=batch_size,
+        num_epochs=num_epochs,
+        num_workers=num_workers,
+        use_gpu=use_gpu,
+    )
+    trainer = PPOTrainer(cfg)
+
+    steps_per_iter = trainer.batch_size // 2  # 2 agents per env-step
+
+    # Warmup (untimed) — primes CUDA context, cudnn benchmark, worker pool spawn
+    for _ in range(num_warmup):
+        rollout = trainer.collect_rollout(steps_per_iter)
+        trainer.update_policy(rollout)
+
+    # Timed
+    trainer.timers.enabled = True
+    trainer.timers.reset()
+    for _ in range(num_timed):
+        rollout = trainer.collect_rollout(steps_per_iter)
+        trainer.update_policy(rollout)
+    trainer.timers.enabled = False
+
+    summary = trainer.timers.summary()
+
+    # Cleanup — persistent worker pool + writer
+    if trainer._worker_pool is not None:
+        trainer._worker_pool.terminate()
+        trainer._worker_pool.join()
+        trainer._worker_pool = None
+    trainer.writer.close()
+
+    return {
+        'name': name,
+        'map_names': list(map_names),
+        'use_gpu': use_gpu,
+        'num_workers': num_workers,
+        'batch_size': batch_size,
+        'num_epochs': num_epochs,
+        'num_timed_iters': num_timed,
+        'timings': summary,
+    }
+
+
+def _print_bench_table(results):
+    """Print a Markdown table of per-section avg-ms across all scenarios."""
+    scenarios = [r for r in results if r is not None]
+    if not scenarios:
+        print("(no scenarios to display)")
+        return
+
+    # Collect all section names across scenarios
+    section_names = sorted(set(
+        s for r in scenarios for s in r['timings'].keys()
+    ))
+    scen_names = [r['name'] for r in scenarios]
+
+    col_width = max(24, max((len(s) for s in section_names), default=24))
+    val_width = max(14, max((len(n) for n in scen_names), default=14))
+
+    def fmt_cell(v, w):
+        return f"{v:>{w}}"
+
+    # Header
+    header = "| " + fmt_cell("section", col_width) + " |"
+    for n in scen_names:
+        header += " " + fmt_cell(n, val_width) + " |"
+    sep = "|" + "-" * (col_width + 2) + "|"
+    for _ in scen_names:
+        sep += "-" * (val_width + 2) + "|"
+
+    print()
+    print(header)
+    print(sep)
+
+    for section in section_names:
+        row = "| " + fmt_cell(section, col_width) + " |"
+        for r in scenarios:
+            info = r['timings'].get(section)
+            if info is None:
+                row += " " + fmt_cell("-", val_width) + " |"
+            else:
+                row += " " + fmt_cell(f"{info['avg_ms']:.2f} ms", val_width) + " |"
+        print(row)
+
+    # Also print total wall clock per scenario (sum of rollout.total + update.total)
+    print()
+    for r in scenarios:
+        t = r['timings']
+        roll = t.get('rollout.total', {}).get('avg_ms', 0.0)
+        upd = t.get('update.total', {}).get('avg_ms', 0.0)
+        print(f"  {r['name']}: iter avg = {(roll + upd) / 1000.0:.3f} s "
+              f"(rollout {roll / 1000.0:.3f} s + update {upd / 1000.0:.3f} s)")
+
+
+def run_profile(output_dir, batch_size, num_epochs, num_warmup, num_timed):
+    """Run the 4-scenario baseline benchmark."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n" + "=" * 60)
+    print("BENCHMARK — baseline (HEAD)")
+    print("=" * 60)
+    print(f"  batch_size={batch_size}  num_epochs={num_epochs}  "
+          f"warmup={num_warmup}  timed={num_timed}")
+    print(f"  output: {output_dir}")
+
+    scenarios = [
+        ('simple6_cpu_w1',   ['simple_6'],                          False, 1),
+        ('simple6_gpu_w1',   ['simple_6'],                          True,  1),
+        ('multimap_cpu_w1',  ['simple_6', 'medium_8', 'large_10'],  False, 1),
+        ('multimap_cpu_w4',  ['simple_6', 'medium_8', 'large_10'],  False, 4),
+        # The realistic training config: CPU workers do rollout (avoid per-step
+        # GPU-kernel-launch overhead), GPU does the mega-batch update.
+        ('multimap_gpu_w4',  ['simple_6', 'medium_8', 'large_10'],  True,  4),
+    ]
+
+    results = []
+    for name, maps, use_gpu, workers in scenarios:
+        r = _run_profile_scenario(
+            name=name, map_names=maps, use_gpu=use_gpu, num_workers=workers,
+            output_dir=str(output_dir), batch_size=batch_size, num_epochs=num_epochs,
+            num_warmup=num_warmup, num_timed=num_timed,
+        )
+        results.append(r)
+
+    _print_bench_table(results)
+
+    out_path = output_dir / 'benchmark_baseline.json'
+    with open(out_path, 'w') as f:
+        json.dump({
+            'timestamp': datetime.now().isoformat(),
+            'config': {
+                'batch_size': batch_size,
+                'num_epochs': num_epochs,
+                'num_warmup': num_warmup,
+                'num_timed': num_timed,
+            },
+            'scenarios': [r for r in results if r is not None],
+        }, f, indent=2)
+    print(f"\n  saved: {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -532,7 +791,57 @@ def main():
         default=50,
         help='MCTS simulation budget per move during evaluation',
     )
+    parser.add_argument(
+        '--profile',
+        action='store_true',
+        help='Run baseline benchmark (4 scenarios: CPU/GPU × single/multi-map, '
+             'single vs 4 workers), save benchmark_baseline.json and exit.',
+    )
+    parser.add_argument(
+        '--profile-batch-size',
+        type=int, default=1024,
+        help='Batch size for --profile scenarios (kept small for speed).',
+    )
+    parser.add_argument(
+        '--profile-num-epochs',
+        type=int, default=3,
+        help='Number of SGD epochs per iter for --profile scenarios.',
+    )
+    parser.add_argument(
+        '--profile-iters',
+        type=int, default=5,
+        help='Number of timed iterations per --profile scenario.',
+    )
+    parser.add_argument(
+        '--profile-warmup',
+        type=int, default=1,
+        help='Warmup iterations before timing starts (primes CUDA / worker pool).',
+    )
+    parser.add_argument(
+        '--cpu', action='store_true',
+        help='Force CPU device even when CUDA is available.',
+    )
+    parser.add_argument(
+        '--num-workers', type=int, default=1,
+        help='Number of parallel rollout workers (spawn processes). '
+             '1 = sequential in the main process.',
+    )
+    parser.add_argument(
+        '--serial-eval', action='store_true',
+        help='Force sequential per-map evaluation (disables the '
+             'ProcessPoolExecutor path). Useful for debugging.',
+    )
     args = parser.parse_args()
+
+    if args.profile:
+        run_profile(
+            output_dir=args.output_dir,
+            batch_size=args.profile_batch_size,
+            num_epochs=args.profile_num_epochs,
+            num_warmup=args.profile_warmup,
+            num_timed=args.profile_iters,
+        )
+        return
 
     if args.quick:
         num_iterations = 30
@@ -570,6 +879,12 @@ def main():
     # -----------------------------------------------------------------------
     # Phase 1: Train 3-map model and evaluate at intervals
     # -----------------------------------------------------------------------
+    use_gpu = not args.cpu
+    num_workers = args.num_workers
+    parallel_eval = not args.serial_eval
+    print(f"  Device:          {'GPU' if use_gpu else 'CPU'}   Workers: {num_workers}"
+          f"   Parallel eval: {parallel_eval}")
+
     full_trainer, per_map_win_rates, eval_iterations = train_with_eval(
         map_names_to_train=ALL_MAPS,
         num_iterations=num_iterations,
@@ -583,22 +898,57 @@ def main():
         num_epochs=num_epochs,
         save_weights_path=checkpoint_dir / 'all_3_maps' / 'final.pt',
         mcts_budget=mcts_budget,
+        num_workers=num_workers,
+        use_gpu=use_gpu,
+        parallel_eval=parallel_eval,
     )
 
-    # Final evaluation on each map with more episodes for stable estimates
+    # Final evaluation on each map with more episodes for stable estimates.
+    # evaluate_policy_vs_mcts builds observations on CPU, so we snapshot the
+    # policy to CPU and rebuild there (avoids the GPU/CPU device mismatch
+    # the direct sequential loop would hit when training ran on GPU).
     print(f"\n{'='*60}")
     print("Final evaluation of 3-map model")
     print('='*60)
     final_win_rates = {}
-    for idx, map_name in enumerate(ALL_MAPS):
-        result = evaluate_policy_vs_mcts(
-            full_trainer.policy, full_trainer.action_decoder,
-            map_name, full_trainer.action_budget, num_episodes * 2,
-            mcts_budget=mcts_budget, seed_offset=idx * 2000,
-        )
-        final_win_rates[map_name] = result['win_rate']
-        print(f"  {map_name}: {result['win_rate']:.2%}  "
-              f"({result['wins']}W/{result['losses']}L/{result['draws']}D)")
+
+    if parallel_eval and len(ALL_MAPS) > 1:
+        # Reuse the parallel-eval worker (spawns CPU processes, one per map).
+        state_dict_cpu, model_kwargs = _snapshot_policy_for_eval(full_trainer)
+        with ProcessPoolExecutor(
+            max_workers=len(ALL_MAPS),
+            mp_context=mp.get_context('spawn'),
+        ) as ex:
+            futures = {
+                map_name: ex.submit(
+                    _eval_worker,
+                    (state_dict_cpu, model_kwargs, map_name,
+                     full_trainer.action_budget, num_episodes * 2,
+                     mcts_budget, idx * 2000),
+                )
+                for idx, map_name in enumerate(ALL_MAPS)
+            }
+            for map_name in ALL_MAPS:
+                _, result = futures[map_name].result()
+                final_win_rates[map_name] = result['win_rate']
+                print(f"  {map_name}: {result['win_rate']:.2%}  "
+                      f"({result['wins']}W/{result['losses']}L/{result['draws']}D)")
+    else:
+        # Serial fallback: move the policy to CPU for eval, then back.
+        original_device = full_trainer.device
+        full_trainer.policy.to('cpu')
+        try:
+            for idx, map_name in enumerate(ALL_MAPS):
+                result = evaluate_policy_vs_mcts(
+                    full_trainer.policy, full_trainer.action_decoder,
+                    map_name, full_trainer.action_budget, num_episodes * 2,
+                    mcts_budget=mcts_budget, seed_offset=idx * 2000,
+                )
+                final_win_rates[map_name] = result['win_rate']
+                print(f"  {map_name}: {result['win_rate']:.2%}  "
+                      f"({result['wins']}W/{result['losses']}L/{result['draws']}D)")
+        finally:
+            full_trainer.policy.to(original_device)
     full_trainer.policy.train()
 
     # -----------------------------------------------------------------------
@@ -656,6 +1006,9 @@ def main():
             batch_size=batch_size,
             num_epochs=num_epochs,
             mcts_budget=mcts_budget,
+            num_workers=num_workers,
+            use_gpu=use_gpu,
+            parallel_eval=parallel_eval,
         )
         results['transfer_results'] = {
             key: {

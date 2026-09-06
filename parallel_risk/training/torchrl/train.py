@@ -9,8 +9,11 @@ Usage:
 
 import argparse
 import os
+import time
 import yaml
 import multiprocessing as mp
+from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Any
 from datetime import datetime
@@ -27,6 +30,57 @@ from parallel_risk.env.reward_shaping import RewardShapingConfig
 from parallel_risk.training.torchrl.graph_wrapper import GraphObservationWrapper, env_to_graph
 from parallel_risk.models.gnn_gcn import GCNPolicy
 from parallel_risk.models.action_decoder import ActionDecoder
+
+
+# ---------------------------------------------------------------------------
+# TimingRecorder — no-op unless .enabled is True. Used by --profile mode.
+# ---------------------------------------------------------------------------
+
+class TimingRecorder:
+    """
+    Records per-section wall-clock. When the trainer's device is CUDA,
+    synchronizes before/after so kernel time is measured, not launch time.
+    Disabled by default (zero overhead); flip `.enabled = True` to start recording.
+    """
+
+    def __init__(self, device: torch.device = None):
+        self.enabled = False
+        self.device = device
+        self._sums = defaultdict(float)
+        self._counts = defaultdict(int)
+
+    def reset(self):
+        self._sums.clear()
+        self._counts.clear()
+
+    @contextmanager
+    def section(self, name: str):
+        if not self.enabled:
+            yield
+            return
+        cuda = self.device is not None and self.device.type == 'cuda'
+        if cuda:
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            if cuda:
+                torch.cuda.synchronize()
+            dt = time.perf_counter() - t0
+            self._sums[name] += dt
+            self._counts[name] += 1
+
+    def summary(self) -> Dict[str, Dict[str, float]]:
+        return {
+            name: {
+                'total_s': self._sums[name],
+                'count': self._counts[name],
+                'avg_ms': (self._sums[name] / self._counts[name]) * 1000.0
+                          if self._counts[name] else 0.0,
+            }
+            for name in sorted(self._sums.keys())
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +315,15 @@ class PPOTrainer:
             config: Configuration dict with hyperparameters
         """
         self.config = config
-        self.device = torch.device('cuda' if torch.cuda.is_available() and config.get('use_gpu', False) else 'cpu')
+        use_gpu = config.get('training', {}).get('use_gpu', config.get('use_gpu', False))
+        self.device = torch.device('cuda' if torch.cuda.is_available() and use_gpu else 'cpu')
+
+        # Perf knobs for CUDA. TF32 gives large matmul speedup on Ampere+ with
+        # negligible precision cost; cudnn.benchmark picks the fastest conv
+        # kernel per input shape (safe because our shapes are stable per map).
+        if self.device.type == 'cuda':
+            torch.set_float32_matmul_precision('high')
+            torch.backends.cudnn.benchmark = True
 
         # Create environment to get observation/action space info
         env_config = config['env']
@@ -360,6 +422,9 @@ class PPOTrainer:
         # Persistent worker pool — created once to amortize spawn overhead
         self._worker_pool = None
 
+        # Timing (no-op unless .enabled = True; used by --profile)
+        self.timers = TimingRecorder(device=self.device)
+
     def _build_worker_args(self, worker_seed: int, steps_each: int):
         """Build args tuple for _rollout_worker."""
         model_kwargs = dict(
@@ -399,9 +464,10 @@ class PPOTrainer:
         Returns:
             rollout: Dict containing collected experience
         """
-        if self.num_workers > 1:
-            return self._collect_rollout_parallel(num_steps)
-        return self._collect_rollout_sequential(num_steps)
+        with self.timers.section('rollout.total'):
+            if self.num_workers > 1:
+                return self._collect_rollout_parallel(num_steps)
+            return self._collect_rollout_sequential(num_steps)
 
     def _collect_rollout_parallel(self, num_steps: int):
         """Parallel version: reuses persistent worker pool across iterations."""
@@ -415,7 +481,8 @@ class PPOTrainer:
             for w in range(self.num_workers)
         ]
 
-        worker_rollouts = self._worker_pool.map(_rollout_worker, worker_args)
+        with self.timers.section('rollout.pool_map'):
+            worker_rollouts = self._worker_pool.map(_rollout_worker, worker_args)
 
         # Merge all worker rollouts into one
         merged = {
@@ -448,7 +515,23 @@ class PPOTrainer:
                 if map_name in self.episode_rewards_per_map:
                     self.episode_rewards_per_map[map_name].extend(rewards)
 
+        # Workers build rollouts on CPU (see _rollout_worker). Move everything
+        # to the trainer's device so update_policy runs on GPU when configured.
+        if self.device.type != 'cpu':
+            merged = self._move_rollout_to_device(merged, self.device)
         return merged
+
+    def _move_rollout_to_device(self, rollout, device):
+        """Move a rollout dict (from CPU workers) onto the trainer's device."""
+        def _mv(x):
+            return x.to(device, non_blocking=True) if hasattr(x, 'to') else x
+        # PyG Batch objects and individual Data objects both support .to()
+        rollout['observations'] = [_mv(b) for b in rollout['observations']]
+        rollout['graph_lists'] = [[_mv(g) for g in gl] for gl in rollout['graph_lists']]
+        for key in ('actions', 'rewards', 'values', 'log_probs',
+                    'dones', 'batches', 'next_values'):
+            rollout[key] = [_mv(t) for t in rollout[key]]
+        return rollout
 
     def _collect_rollout_sequential(self, num_steps: int):
         """Original sequential rollout collection (num_workers == 1)."""
@@ -651,6 +734,11 @@ class PPOTrainer:
         return advantages, returns
 
     def update_policy(self, rollout):
+        """Time-wrapped entry point; see _update_policy_impl for the real work."""
+        with self.timers.section('update.total'):
+            self._update_policy_impl(rollout)
+
+    def _update_policy_impl(self, rollout):
         """
         Update policy using PPO.
 
@@ -687,20 +775,23 @@ class PPOTrainer:
 
         for epoch in range(self.num_epochs):
             # ONE forward pass through all T*B graphs
-            action_logits, new_values, _ = self.policy(mega_batch)
+            with self.timers.section('update.forward_per_epoch'):
+                action_logits, new_values, _ = self.policy(mega_batch)
 
-            new_log_probs = self.action_decoder.compute_log_probs(
-                action_logits,
-                all_actions_flat,
-                mega_batch.batch,
-                observations=all_graphs,
-            ).sum(dim=1).view(T, B)  # [T, B]
+            with self.timers.section('update.log_probs'):
+                new_log_probs = self.action_decoder.compute_log_probs(
+                    action_logits,
+                    all_actions_flat,
+                    mega_batch.batch,
+                    observations=all_graphs,
+                ).sum(dim=1).view(T, B)  # [T, B]
 
-            entropy = self.action_decoder.compute_entropy(
-                action_logits,
-                mega_batch.batch,
-                observations=all_graphs,
-            ).mean(dim=1).view(T, B)  # [T, B]
+            with self.timers.section('update.entropy'):
+                entropy = self.action_decoder.compute_entropy(
+                    action_logits,
+                    mega_batch.batch,
+                    observations=all_graphs,
+                ).mean(dim=1).view(T, B)  # [T, B]
 
             new_values_2d = new_values.squeeze(-1).view(T, B)  # [T, B]
 
@@ -732,10 +823,12 @@ class PPOTrainer:
             entropy_loss = -ent_flat.mean()
             loss = policy_loss + self.value_loss_coeff * value_loss + self.entropy_coeff * entropy_loss
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-            self.optimizer.step()
+            with self.timers.section('update.backward'):
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            with self.timers.section('update.optimizer_step'):
+                self.optimizer.step()
 
             if epoch == self.num_epochs - 1:
                 self.writer.add_scalar('Loss/policy', policy_loss.item(), self.global_step)
