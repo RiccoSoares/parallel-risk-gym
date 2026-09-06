@@ -1,62 +1,83 @@
 {
   "experiment": "multi_map_training",
-  "timestamp": "2026-09-03T19:53:30.026603",
+  "timestamp": "2026-09-06T01:59:12.864331",
   "config": {
-    "num_iterations": 30,
-    "eval_interval": 10,
-    "num_episodes": 20,
-    "quick_mode": true,
+    "num_iterations": 200,
+    "eval_interval": 25,
+    "num_episodes": 50,
+    "mcts_budget": 50,
+    "quick_mode": false,
     "maps": [
       "simple_6",
       "medium_8",
       "large_10"
     ],
-    "batch_size": 400,
-    "num_epochs": 3
+    "batch_size": 4096,
+    "num_epochs": 10
   },
   "per_map_win_rates": {
     "simple_6": [
-      0.25,
-      0.35,
-      0.4
+      0.04,
+      0.28,
+      0.48,
+      0.74,
+      0.86,
+      0.82,
+      0.88,
+      0.94
     ],
     "medium_8": [
-      0.0,
-      0.0,
-      0.0
+      0.02,
+      0.76,
+      0.96,
+      0.84,
+      0.94,
+      0.98,
+      1.0,
+      1.0
     ],
     "large_10": [
-      0.15,
-      0.3,
-      0.15
+      0.06,
+      0.7,
+      0.96,
+      0.84,
+      0.92,
+      0.96,
+      1.0,
+      0.98
     ]
   },
   "eval_iterations": [
-    10,
-    20,
-    30
+    25,
+    50,
+    75,
+    100,
+    125,
+    150,
+    175,
+    200
   ],
   "final_win_rates": {
-    "simple_6": 0.425,
-    "medium_8": 0.0,
-    "large_10": 0.125
+    "simple_6": 0.86,
+    "medium_8": 1.0,
+    "large_10": 0.99
   },
   "transfer_results": {
     "2map_on_large10": {
-      "win_rate": 0.15,
-      "wins": 6.0,
-      "losses": 2.0,
-      "draws": 32.0,
-      "total_episodes": 40.0,
-      "avg_episode_length": 47.275
+      "win_rate": 0.9,
+      "wins": 90.0,
+      "losses": 0.0,
+      "draws": 10.0,
+      "total_episodes": 100.0,
+      "avg_episode_length": 33.07
     },
     "3map_on_large10": {
-      "win_rate": 0.05,
-      "wins": 2.0,
+      "win_rate": 0.98,
+      "wins": 98.0,
       "losses": 0.0,
-      "draws": 38.0,
-      "total_episodes": 40.0,
-      "avg_episode_length": 49.275
+      "draws": 2.0,
+      "total_episodes": 100.0,
+      "avg_episode_length": 21.27
     }
   }
 }

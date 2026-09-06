@@ -1,0 +1,267 @@
+{
+  "timestamp": "2026-09-05T08:18:43.520243",
+  "config": {
+    "batch_size": 1024,
+    "num_epochs": 3,
+    "num_warmup": 1,
+    "num_timed": 5
+  },
+  "scenarios": [
+    {
+      "name": "simple6_cpu_w1",
+      "map_names": [
+        "simple_6"
+      ],
+      "use_gpu": false,
+      "num_workers": 1,
+      "batch_size": 1024,
+      "num_epochs": 3,
+      "num_timed_iters": 5,
+      "timings": {
+        "rollout.total": {
+          "total_s": 15.022565599996597,
+          "count": 5,
+          "avg_ms": 3004.5131199993193
+        },
+        "update.backward": {
+          "total_s": 0.539795600110665,
+          "count": 15,
+          "avg_ms": 35.986373340711
+        },
+        "update.entropy": {
+          "total_s": 0.18850749940611422,
+          "count": 15,
+          "avg_ms": 12.56716662707428
+        },
+        "update.forward_per_epoch": {
+          "total_s": 1.2956851990893483,
+          "count": 15,
+          "avg_ms": 86.37901327262323
+        },
+        "update.log_probs": {
+          "total_s": 0.19226159970276058,
+          "count": 15,
+          "avg_ms": 12.817439980184037
+        },
+        "update.optimizer_step": {
+          "total_s": 0.03760719974525273,
+          "count": 15,
+          "avg_ms": 2.5071466496835155
+        },
+        "update.total": {
+          "total_s": 2.402876399923116,
+          "count": 5,
+          "avg_ms": 480.5752799846232
+        }
+      }
+    },
+    {
+      "name": "simple6_gpu_w1",
+      "map_names": [
+        "simple_6"
+      ],
+      "use_gpu": true,
+      "num_workers": 1,
+      "batch_size": 1024,
+      "num_epochs": 3,
+      "num_timed_iters": 5,
+      "timings": {
+        "rollout.total": {
+          "total_s": 53.52777109993622,
+          "count": 5,
+          "avg_ms": 10705.554219987243
+        },
+        "update.backward": {
+          "total_s": 0.18600480002351105,
+          "count": 15,
+          "avg_ms": 12.400320001567403
+        },
+        "update.entropy": {
+          "total_s": 0.6093799995724112,
+          "count": 15,
+          "avg_ms": 40.625333304827414
+        },
+        "update.forward_per_epoch": {
+          "total_s": 0.06512640090659261,
+          "count": 15,
+          "avg_ms": 4.341760060439507
+        },
+        "update.log_probs": {
+          "total_s": 0.574411200126633,
+          "count": 15,
+          "avg_ms": 38.29408000844221
+        },
+        "update.optimizer_step": {
+          "total_s": 0.011411399813368917,
+          "count": 15,
+          "avg_ms": 0.7607599875579277
+        },
+        "update.total": {
+          "total_s": 1.893251300090924,
+          "count": 5,
+          "avg_ms": 378.6502600181848
+        }
+      }
+    },
+    {
+      "name": "multimap_cpu_w1",
+      "map_names": [
+        "simple_6",
+        "medium_8",
+        "large_10"
+      ],
+      "use_gpu": false,
+      "num_workers": 1,
+      "batch_size": 1024,
+      "num_epochs": 3,
+      "num_timed_iters": 5,
+      "timings": {
+        "rollout.total": {
+          "total_s": 15.373892899835482,
+          "count": 5,
+          "avg_ms": 3074.7785799670964
+        },
+        "update.backward": {
+          "total_s": 0.7183110001496971,
+          "count": 15,
+          "avg_ms": 47.88740000997981
+        },
+        "update.entropy": {
+          "total_s": 0.2152407995890826,
+          "count": 15,
+          "avg_ms": 14.349386639272174
+        },
+        "update.forward_per_epoch": {
+          "total_s": 1.7413025004789233,
+          "count": 15,
+          "avg_ms": 116.08683336526155
+        },
+        "update.log_probs": {
+          "total_s": 0.21308540040627122,
+          "count": 15,
+          "avg_ms": 14.205693360418081
+        },
+        "update.optimizer_step": {
+          "total_s": 0.035488699562847614,
+          "count": 15,
+          "avg_ms": 2.3659133041898412
+        },
+        "update.total": {
+          "total_s": 3.0680663001257926,
+          "count": 5,
+          "avg_ms": 613.6132600251585
+        }
+      }
+    },
+    {
+      "name": "multimap_cpu_w4",
+      "map_names": [
+        "simple_6",
+        "medium_8",
+        "large_10"
+      ],
+      "use_gpu": false,
+      "num_workers": 4,
+      "batch_size": 1024,
+      "num_epochs": 3,
+      "num_timed_iters": 5,
+      "timings": {
+        "rollout.pool_map": {
+          "total_s": 11.046004299772903,
+          "count": 5,
+          "avg_ms": 2209.2008599545807
+        },
+        "rollout.total": {
+          "total_s": 11.052285099867731,
+          "count": 5,
+          "avg_ms": 2210.4570199735463
+        },
+        "update.backward": {
+          "total_s": 0.6880575998220593,
+          "count": 15,
+          "avg_ms": 45.870506654803954
+        },
+        "update.entropy": {
+          "total_s": 0.24551650043576956,
+          "count": 15,
+          "avg_ms": 16.36776669571797
+        },
+        "update.forward_per_epoch": {
+          "total_s": 1.7433051001280546,
+          "count": 15,
+          "avg_ms": 116.22034000853697
+        },
+        "update.log_probs": {
+          "total_s": 0.23625310021452606,
+          "count": 15,
+          "avg_ms": 15.750206680968402
+        },
+        "update.optimizer_step": {
+          "total_s": 0.03587039886042476,
+          "count": 15,
+          "avg_ms": 2.391359924028317
+        },
+        "update.total": {
+          "total_s": 3.0970483999699354,
+          "count": 5,
+          "avg_ms": 619.4096799939871
+        }
+      }
+    },
+    {
+      "name": "multimap_gpu_w4",
+      "map_names": [
+        "simple_6",
+        "medium_8",
+        "large_10"
+      ],
+      "use_gpu": true,
+      "num_workers": 4,
+      "batch_size": 1024,
+      "num_epochs": 3,
+      "num_timed_iters": 5,
+      "timings": {
+        "rollout.pool_map": {
+          "total_s": 10.4026510999538,
+          "count": 5,
+          "avg_ms": 2080.53021999076
+        },
+        "rollout.total": {
+          "total_s": 11.342964499955997,
+          "count": 5,
+          "avg_ms": 2268.5928999911994
+        },
+        "update.backward": {
+          "total_s": 0.2787711997516453,
+          "count": 15,
+          "avg_ms": 18.584746650109686
+        },
+        "update.entropy": {
+          "total_s": 0.544418100034818,
+          "count": 15,
+          "avg_ms": 36.294540002321206
+        },
+        "update.forward_per_epoch": {
+          "total_s": 0.09229900012724102,
+          "count": 15,
+          "avg_ms": 6.153266675149401
+        },
+        "update.log_probs": {
+          "total_s": 0.546915200073272,
+          "count": 15,
+          "avg_ms": 36.46101333821814
+        },
+        "update.optimizer_step": {
+          "total_s": 0.010882100090384483,
+          "count": 15,
+          "avg_ms": 0.7254733393589655
+        },
+        "update.total": {
+          "total_s": 1.9407944998238236,
+          "count": 5,
+          "avg_ms": 388.1588999647647
+        }
+      }
+    }
+  ]
+}
