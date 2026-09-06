@@ -223,11 +223,31 @@ def _snapshot_policy_for_eval(trainer):
 # Training loop with inline evaluation
 # ---------------------------------------------------------------------------
 
+def _save_training_checkpoint(trainer, path, iteration, extras=None):
+    """
+    Persist policy + optimizer + config to ``path``. Matches the checkpoint
+    schema used by ``PPOTrainer.train`` in ``parallel_risk/training/torchrl/train.py``
+    so downstream tools can load either interchangeably.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        'iteration': iteration,
+        'policy_state_dict': trainer.policy.state_dict(),
+        'optimizer_state_dict': trainer.optimizer.state_dict(),
+        'config': trainer.config,
+    }
+    if extras:
+        payload.update(extras)
+    torch.save(payload, path)
+
+
 def train_with_eval(map_names_to_train, num_iterations, eval_interval,
                     num_episodes, output_dir, checkpoint_dir,
                     label='', verbose=True, batch_size=4096, num_epochs=10,
                     save_weights_path=None, mcts_budget=50,
-                    num_workers=1, use_gpu=True, parallel_eval=True):
+                    num_workers=1, use_gpu=True, parallel_eval=True,
+                    save_intermediate=True):
     """
     Train a multi-map (or single-map) GNN with per-map evaluation at regular
     intervals.  Manages the PPO loop directly so evaluation happens in-memory
@@ -236,6 +256,10 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
     Args:
         save_weights_path: If provided, saves final policy weights (state_dict)
                            to this path after training completes.
+        save_intermediate: If True (default), also drop a
+                           ``checkpoint_{iter:06d}.pt`` into ``checkpoint_dir``
+                           at every eval interval. Needed to rerun evals
+                           against past training states without retraining.
 
     Returns:
         trainer         — PPOTrainer (policy accessible via trainer.policy)
@@ -290,6 +314,15 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
                 eval_iterations.append(iteration + 1)
                 if verbose:
                     print(f"\n  -- eval @ iter {iteration+1} --")
+
+                if save_intermediate:
+                    ckpt_path = Path(checkpoint_dir) / f"checkpoint_{iteration+1:06d}.pt"
+                    _save_training_checkpoint(
+                        trainer, ckpt_path, iteration + 1,
+                        extras={'map_names': list(map_names_to_train)},
+                    )
+                    if verbose:
+                        print(f"    saved checkpoint: {ckpt_path}")
 
                 if eval_executor is not None:
                     # Parallel: submit one job per map, wait for all.
@@ -378,17 +411,19 @@ def run_transfer_test(full_trainer, num_iterations, eval_interval,
     print("Transfer test: 2-map model vs 3-map model on large_10")
     print('='*60)
 
+    two_map_ckpt_dir = Path(checkpoint_dir) / 'transfer_2map'
     two_map_trainer, _, _ = train_with_eval(
         map_names_to_train=TWO_MAPS,
         num_iterations=num_iterations,
         eval_interval=eval_interval,
         num_episodes=num_episodes,
         output_dir=output_dir,
-        checkpoint_dir=checkpoint_dir / 'transfer_2map',
+        checkpoint_dir=two_map_ckpt_dir,
         label='2-map model (simple_6 + medium_8)',
         verbose=verbose,
         batch_size=batch_size,
         num_epochs=num_epochs,
+        save_weights_path=two_map_ckpt_dir / 'final.pt',
         mcts_budget=mcts_budget,
         num_workers=num_workers,
         use_gpu=use_gpu,
@@ -1049,7 +1084,12 @@ def main():
         saved.append('transfer_comparison.png')
     for fname in saved:
         print(f"  {fname}")
-    print(f"  Weights: {checkpoint_dir / 'all_3_maps' / 'final.pt'}")
+    print(f"\nCheckpoints written to {checkpoint_dir}:")
+    print(f"  3-map (final):        {checkpoint_dir / 'all_3_maps' / 'final.pt'}")
+    print(f"  3-map (per eval):     {checkpoint_dir / 'all_3_maps' / 'checkpoint_XXXXXX.pt'}")
+    if not args.skip_transfer:
+        print(f"  2-map (final):        {checkpoint_dir / 'transfer_2map' / 'final.pt'}")
+        print(f"  2-map (per eval):     {checkpoint_dir / 'transfer_2map' / 'checkpoint_XXXXXX.pt'}")
     print("="*60)
 
 
