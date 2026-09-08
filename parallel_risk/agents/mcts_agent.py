@@ -266,6 +266,8 @@ class DuctMCTS:
         pw_alpha: float = 0.5,
         max_rollout_turns: int = 50,
         value_fn=None,
+        policy_fn=None,
+        c_puct: float = 1.4,
     ):
         self.sim = simulator
         self.samplers = {'agent_0': action_sampler_0, 'agent_1': action_sampler_1}
@@ -276,6 +278,38 @@ class DuctMCTS:
         # Signature: value_fn(game_state: dict, agent_id: str) -> float
         # When None, falls back to random rollouts (default MCTS behaviour).
         self.value_fn = value_fn
+        # Optional neural policy function for PUCT-guided selection.
+        # Signature: policy_fn(game_state: dict, agent_id: str, action_dict: dict) -> float
+        # Returns the summed log-prob of the given action under the policy.
+        # When None, selection uses vanilla UCT (unchanged behaviour).
+        self.policy_fn = policy_fn
+        self.c_puct = c_puct
+
+    def _add_sampled_action(self, node: DuctNode, agent_id: str) -> bool:
+        """Sample one action for `agent_id` at `node` and register it.
+
+        Uses the agent's sampler to draw a candidate action, adds it to the
+        node's available_actions if new, and pre-seeds the stats dict with
+        the PUCT prior (when policy_fn is set) so `_puct_select` can read it
+        without an extra forward pass. When policy_fn is None, prior is 0.0
+        (exp(0)=1, harmless for the vanilla UCT branch which ignores 'p').
+
+        Returns True if a new action was added, False if the sampler
+        returned a duplicate. Callers rely on this signal for exhaustion
+        detection (progressive widening + `apply_root_dirichlet`).
+        """
+        obs = self.sim.state_to_obs(node.game_state, agent_id)
+        action_dict = self.samplers[agent_id].get_action_raw(obs)
+        key = _action_to_key(action_dict)
+        if key in node.available_actions[agent_id]:
+            return False
+        node.available_actions[agent_id].append(key)
+        if key not in node.stats[agent_id]:
+            prior = 0.0
+            if self.policy_fn is not None:
+                prior = self.policy_fn(node.game_state, agent_id, action_dict)
+            node.stats[agent_id][key] = {'q': 0.0, 'n': 0, 'p': prior}
+        return True
 
     def make_root(self, game_state: dict) -> DuctNode:
         """Create root node from current game state."""
@@ -292,12 +326,9 @@ class DuctMCTS:
             rewards, _ = self.sim._check_terminal(state)
             node.terminal_rewards = rewards
         else:
-            # Seed each player's action list with one sampled action
+            # Seed each player's action list with one sampled action (+ prior)
             for agent in self.sim.AGENTS:
-                obs = self.sim.state_to_obs(state, agent)
-                key = _action_to_key(self.samplers[agent].get_action_raw(obs))
-                if key not in node.available_actions[agent]:
-                    node.available_actions[agent].append(key)
+                self._add_sampled_action(node, agent)
         return node
 
     def run(self, root: DuctNode, budget: int) -> None:
@@ -324,6 +355,116 @@ class DuctMCTS:
             best_key = root.available_actions[agent_id][0]
         return _key_to_action(best_key)
 
+    def policy_target(self, root: DuctNode, agent_id: str) -> dict:
+        """Normalized visit distribution over the root's available actions.
+
+        Returns {action_key: probability}. If every action has zero visits
+        (e.g. budget=0), returns a uniform distribution over available actions.
+        Distillation targets for MCTS+GNN training read from this.
+        """
+        counts = {
+            key: float(root.stats[agent_id].get(key, {}).get('n', 0))
+            for key in root.available_actions[agent_id]
+        }
+        total = sum(counts.values())
+        if total <= 0:
+            k = len(counts)
+            if k == 0:
+                return {}
+            return {key: 1.0 / k for key in counts}
+        return {key: n / total for key, n in counts.items()}
+
+    def apply_root_dirichlet(self, root: DuctNode, alpha: float = 0.3,
+                             noise_frac: float = 0.25,
+                             min_actions: int = 8, rng=None) -> None:
+        """Mix Dirichlet noise into stored per-action priors at the root.
+
+        AlphaZero-style: for each agent, ensure at least `min_actions`
+        candidates are known (calling the sampler if the seeded set is
+        smaller), then draw one `Dirichlet(alpha, k)` and mix in
+        probability space as
+            p_mixed = (1 - frac) * softmax(raw_priors) + frac * noise
+        storing `log(p_mixed)` back into `stats[agent][key]['p']`.
+
+        Softmax-normalizing the raw priors before mixing matters — otherwise
+        `exp(raw_log_prob)` on our huge joint action space is ~1e-8 and the
+        noise term dominates every key uniformly, defeating exploration.
+
+        `min_actions` guards against the degenerate case where `make_root`
+        seeded only 1 action per agent: `Dirichlet([alpha])` with k=1 always
+        samples [1.0] and injects zero noise.
+
+        No-op when `noise_frac <= 0` or when the sampler yields no candidates.
+        Accepts a numpy Generator `rng` for reproducibility; falls back to a
+        fresh default_rng() if None.
+        """
+        if noise_frac <= 0.0:
+            return
+        if rng is None:
+            rng = np.random.default_rng()
+        for agent in self.sim.AGENTS:
+            # Widen the action set to at least min_actions (stop early if
+            # the sampler is stuck returning duplicates).
+            consec_dupes = 0
+            while len(root.available_actions[agent]) < min_actions:
+                if root.is_terminal:
+                    break
+                added = self._add_sampled_action(root, agent)
+                if not added:
+                    consec_dupes += 1
+                    if consec_dupes >= 3:
+                        break
+                else:
+                    consec_dupes = 0
+
+            keys = list(root.available_actions[agent])
+            k = len(keys)
+            if k == 0:
+                continue
+
+            # Softmax over stored raw log-priors so mixing happens in
+            # probability space with comparable magnitudes.
+            raw = [float(root.stats[agent].get(key, {}).get('p', 0.0)) for key in keys]
+            max_p = max(raw)
+            exps = [math.exp(p - max_p) for p in raw]
+            z = sum(exps) or 1.0
+            normalized = [e / z for e in exps]
+
+            noise = rng.dirichlet([alpha] * k)
+            for i, key in enumerate(keys):
+                s = root.stats[agent].get(key)
+                if s is None:
+                    root.stats[agent][key] = {'q': 0.0, 'n': 0, 'p': 0.0}
+                    s = root.stats[agent][key]
+                p_new = (1.0 - noise_frac) * normalized[i] + noise_frac * float(noise[i])
+                s['p'] = math.log(max(p_new, 1e-12))
+
+    def sampled_action(self, root: DuctNode, agent_id: str,
+                       temperature: float = 1.0) -> dict:
+        """Return an action sampled from `n^(1/T) / sum n^(1/T)`.
+
+        T <= 1e-3 falls back to `best_action` (argmax over visits) to avoid
+        numerical blowups. Standard AlphaZero-style: T=1 for early moves
+        (exploration), T~0 later (exploitation).
+        """
+        if temperature <= 1e-3:
+            return self.best_action(root, agent_id)
+        keys = list(root.available_actions[agent_id])
+        if not keys:
+            raise RuntimeError(f"No available actions at root for {agent_id}")
+        counts = np.array([
+            float(root.stats[agent_id].get(k, {}).get('n', 0))
+            for k in keys
+        ])
+        if counts.sum() <= 0:
+            # No visits yet: uniform sample.
+            probs = np.ones(len(keys)) / len(keys)
+        else:
+            scaled = counts ** (1.0 / temperature)
+            probs = scaled / scaled.sum()
+        idx = int(np.random.choice(len(keys), p=probs))
+        return _key_to_action(keys[idx])
+
     def _select(self, root: DuctNode) -> tuple:
         """Traverse tree using UCT. Returns (leaf_node, path).
 
@@ -333,20 +474,25 @@ class DuctMCTS:
         path = []
 
         while not node.is_terminal and node.visit_count > 0:
-            # Progressive widening: grow each player's action set if needed
+            # Progressive widening: grow each player's action set if needed.
+            # Guard against sampler exhaustion by counting consecutive duplicates.
             for agent in self.sim.AGENTS:
+                consec_dupes = 0
                 attempts = 0
                 while node.visit_count ** self.pw_alpha > len(node.available_actions[agent]):
-                    obs = self.sim.state_to_obs(node.game_state, agent)
-                    key = _action_to_key(self.samplers[agent].get_action_raw(obs))
-                    if key not in node.available_actions[agent]:
-                        node.available_actions[agent].append(key)
+                    added = self._add_sampled_action(node, agent)
+                    if added:
+                        consec_dupes = 0
+                    else:
+                        consec_dupes += 1
+                        if consec_dupes >= 3:
+                            break  # sampler stuck: give up widening at this node
                     attempts += 1
-                    if attempts > 10:  # guard against exhausted action space
+                    if attempts > 20:
                         break
 
-            a0 = self._uct_select(node, 'agent_0')
-            a1 = self._uct_select(node, 'agent_1')
+            a0 = self._select_action(node, 'agent_0')
+            a1 = self._select_action(node, 'agent_1')
             joint_key = (a0, a1)
             path.append((node, a0, a1))
 
@@ -366,16 +512,19 @@ class DuctMCTS:
                 )
                 if not done:
                     for agent in self.sim.AGENTS:
-                        obs = self.sim.state_to_obs(next_state, agent)
-                        key = _action_to_key(self.samplers[agent].get_action_raw(obs))
-                        if key not in child.available_actions[agent]:
-                            child.available_actions[agent].append(key)
+                        self._add_sampled_action(child, agent)
                 node.children[joint_key] = child
                 return child, path
 
             node = node.children[joint_key]
 
         return node, path
+
+    def _select_action(self, node: DuctNode, agent_id: str) -> tuple:
+        """Dispatch to PUCT when a policy_fn is set, otherwise vanilla UCT."""
+        if self.policy_fn is None:
+            return self._uct_select(node, agent_id)
+        return self._puct_select(node, agent_id)
 
     def _uct_select(self, node: DuctNode, agent_id: str) -> tuple:
         """Select action for one player using UCT formula."""
@@ -388,6 +537,45 @@ class DuctMCTS:
             if s is None or s['n'] == 0:
                 return key  # unvisited action gets priority
             score = s['q'] + self.uct_c * math.sqrt(math.log(N) / s['n'])
+            if score > best_score:
+                best_score = score
+                best_key = key
+
+        return best_key
+
+    def _puct_select(self, node: DuctNode, agent_id: str) -> tuple:
+        """PUCT selection: Q + c_puct * P * sqrt(N_parent) / (1 + n).
+
+        Priors P are softmax-normalized across the currently-known action
+        set at this node so they sum to 1 (standard AlphaZero behavior).
+        Without this normalization, `exp(raw_log_prob)` on a large joint
+        action space (~e^-18 for ours) makes the prior term ~1e-8 —
+        eight orders of magnitude smaller than Q — and PUCT collapses to
+        pure Q-argmax. The stored `s['p']` is still the raw log-prior
+        from `policy_fn`; softmax happens here at read time.
+
+        Unvisited actions are returned immediately (same fallback as
+        `_uct_select`) so priors don't starve exploration.
+        """
+        keys = node.available_actions[agent_id]
+        if not keys:
+            raise RuntimeError(f"_puct_select: no available actions for {agent_id}")
+
+        raw = [float(node.stats[agent_id].get(k, {}).get('p', 0.0)) for k in keys]
+        max_p = max(raw)
+        exps = [math.exp(p - max_p) for p in raw]  # log-sum-exp for stability
+        z = sum(exps) or 1.0
+        priors = [e / z for e in exps]
+
+        sqrt_N = math.sqrt(max(node.visit_count, 1))
+        best_key = None
+        best_score = -math.inf
+
+        for key, p in zip(keys, priors):
+            s = node.stats[agent_id].get(key)
+            if s is None or s['n'] == 0:
+                return key
+            score = s['q'] + self.c_puct * p * sqrt_N / (1 + s['n'])
             if score > best_score:
                 best_score = score
                 best_key = key
@@ -426,7 +614,7 @@ class DuctMCTS:
             for agent, key in [('agent_0', a0), ('agent_1', a1)]:
                 r = rewards[agent]
                 if key not in node.stats[agent]:
-                    node.stats[agent][key] = {'q': 0.0, 'n': 0}
+                    node.stats[agent][key] = {'q': 0.0, 'n': 0, 'p': 0.0}
                 s = node.stats[agent][key]
                 s['n'] += 1
                 s['q'] += (r - s['q']) / s['n']  # incremental mean

@@ -30,7 +30,8 @@ def test_gcn_policy_forward():
 
     # Create GCN policy
     node_features_dim = graph.x.shape[1]
-    global_features_dim = graph.global_features.shape[0]
+    # env_to_graph shapes global_features as [1, dim] for PyG batching, so read the last dim
+    global_features_dim = graph.global_features.shape[-1]
 
     policy = GCNPolicy(
         node_features_dim=node_features_dim,
@@ -84,7 +85,8 @@ def test_action_decoder():
 
     # Create GCN policy
     node_features_dim = graph.x.shape[1]
-    global_features_dim = graph.global_features.shape[0]
+    # env_to_graph shapes global_features as [1, dim] for PyG batching, so read the last dim
+    global_features_dim = graph.global_features.shape[-1]
 
     policy = GCNPolicy(
         node_features_dim=node_features_dim,
@@ -168,7 +170,8 @@ def test_batched_graphs():
 
     # Create policy
     node_features_dim = graph1.x.shape[1]
-    global_features_dim = graph1.global_features.shape[0]
+    # env_to_graph shapes global_features as [1, dim] for PyG batching, so read the last dim
+    global_features_dim = graph1.global_features.shape[-1]
 
     policy = GCNPolicy(
         node_features_dim=node_features_dim,
@@ -215,7 +218,8 @@ def test_gradient_flow():
 
     # Create policy
     node_features_dim = graph.x.shape[1]
-    global_features_dim = graph.global_features.shape[0]
+    # env_to_graph shapes global_features as [1, dim] for PyG batching, so read the last dim
+    global_features_dim = graph.global_features.shape[-1]
 
     policy = GCNPolicy(
         node_features_dim=node_features_dim,
