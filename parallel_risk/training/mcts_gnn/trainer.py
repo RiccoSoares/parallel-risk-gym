@@ -214,18 +214,16 @@ class MCTSGNNTrainer:
         value_loss = F.mse_loss(value_preds, z_tensor)
 
         # Policy loss (distillation cross-entropy against visit distribution).
-        log_probs = self.decoder.compute_log_probs(
+        # Per-slot clamp (BEFORE the sum) so the numerical floor scales with
+        # action_budget instead of clipping natural joint log-probs at larger K.
+        # Each slot's log-prob is roughly -log(n_choices_per_slot) ~-8 for
+        # our action space; floor at -10 traps the -1e10 mask sentinel while
+        # keeping real per-slot probabilities above ~4.5e-5.
+        per_slot_log_probs = self.decoder.compute_log_probs(
             action_logits, actions_flat, mega_batch.batch,
             observations=graphs_repeated,
-        ).sum(dim=1)  # [total_rows]
-
-        # Clamp to a numerical floor. The decoder uses a very negative
-        # sentinel (~-1e10) for masked-illegal action components. That
-        # rarely fires with a random-init GNN, but a peaked (PPO-trained)
-        # policy can put a specific action's mask combo close to -inf,
-        # which blows the loss up by ~10 orders of magnitude. Floor of
-        # -20 = "probability ~2e-9", effectively "never".
-        log_probs = log_probs.clamp(min=-20.0)
+        ).clamp(min=-10.0)  # [total_rows, action_budget]
+        log_probs = per_slot_log_probs.sum(dim=1)  # [total_rows]
 
         policy_loss = -(weights_flat * log_probs).sum() / num_kept
 
@@ -282,15 +280,24 @@ class MCTSGNNTrainer:
         }, path)
 
     def load_checkpoint(self, path: Path, load_optimizer: bool = True) -> int:
-        """Load a checkpoint (PPO or MCTS+GNN — same schema). Returns iteration."""
+        """Load a checkpoint (PPO or MCTS+GNN — same schema). Returns iteration.
+
+        Zero-pads input/global projection weights when warm-starting from a
+        checkpoint trained with fewer regions than the current trainer (see
+        `checkpoint_utils.load_state_dict_with_region_padding`).
+        """
+        from parallel_risk.training.mcts_gnn.checkpoint_utils import (
+            load_state_dict_with_region_padding,
+        )
         ckpt = torch.load(Path(path), map_location=self.device)
-        self.policy.load_state_dict(ckpt['policy_state_dict'])
+        load_state_dict_with_region_padding(self.policy, ckpt['policy_state_dict'])
         if load_optimizer and 'optimizer_state_dict' in ckpt:
             try:
                 self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             except (ValueError, KeyError):
-                # PPO checkpoints may carry an incompatible optimizer state
-                # (different LR schedules etc.); ignore rather than fail.
+                # PPO Adam moments have shapes tied to the source input-dims
+                # so they won't match after padding. Silently drop optimizer
+                # state — fresh Adam moments are the safer choice anyway.
                 pass
         return int(ckpt.get('iteration', 0))
 

@@ -1,15 +1,18 @@
 # RL Training Roadmap
 
-**Last Updated:** 2026-09-06
-**Status:** Phase 1 Complete ✓ | Phase 2 Complete ✓ (incl. multi-map + transfer) | MCTS Complete ✓ | Phase 3 (AlphaZero) — Not Started
+**Last Updated:** 2026-09-08
+**Status:** Phase 1 ✓ | Phase 2 ✓ (multi-map + transfer) | MCTS ✓ | Phase 3 (AZ + ExIt) ✓ implementation, research validation ongoing | Phase 4 (Coevolution) planned
 
 ## Overview
 
-This document outlines the plan to enable reinforcement learning training on the Parallel Risk environment. The approach is designed to:
-1. Establish baseline training capability with standard architectures ✓
-2. Transition to graph-based observations for multi-map flexibility ✓
-3. Implement MCTS for a strong tree-search baseline ✓
-4. Combine MCTS + GNN in an AlphaZero-style loop for the strongest possible agent
+Long-arc plan: (1) implement the state-of-the-art RL techniques for adversarial games on this environment, (2) invest in engineering so the testbed can support serious research, (3) once (1) and (2) are done, use the resulting infrastructure to conduct a scientific study — likely on topology-invariant policy learning, method comparison across game complexity regimes, or a novel algorithmic contribution.
+
+The techniques we're implementing are:
+1. Standard architectures with flat observations (PPO with MLPs) ✓
+2. Graph-based observations for multi-map flexibility (PPO with GNNs) ✓
+3. Tree search baselines (Decoupled UCT for simultaneous-move games) ✓
+4. MCTS + GNN in an AlphaZero-style loop (distillation + Expert Iteration variants) ✓
+5. Coevolutionary self-play (Bauer-style population-based training) — planned
 
 ## Strategic Considerations
 
@@ -137,58 +140,152 @@ This document outlines the plan to enable reinforcement learning training on the
 
 ---
 
-## Phase 3: AlphaZero-Style Training — PLANNED
+## Phase 3: MCTS + GNN Training — IMPLEMENTATION COMPLETE ✓, VALIDATION ONGOING
 
-### Motivation
-MCTS provides strong performance via deep search but is expensive at inference (scales with budget). The GNN is fast but weaker than MCTS. AlphaZero-style training bridges this gap: use MCTS to generate high-quality supervision, train the GNN to internalize it, and use the improved GNN to guide future search.
+Two coexisting training tracks land on branch `mcts_gnn_selfplay`:
+- **AZ-distillation**: `parallel_risk/training/mcts_gnn/{self_play,trainer,train}.py` — MCTS self-play → distil visit distribution + outcome
+- **Expert Iteration (ExIt)**: `parallel_risk/training/mcts_gnn/exit_{self_play,trainer,train}.py` — advantage-weighted actor-critic on MCTS-selected actions
+- **Shared agent**: `parallel_risk/agents/mcts_gnn_agent.py` — MCTSGNNAgent with configurable PW sampler + value_fn
+- **DuctMCTS extensions**: PUCT selection with softmax-normalized priors, Dirichlet root noise (with min_actions widening), temperature-based action sampling, visit-distribution accessor
+- **Cross-track interop**: shared checkpoint schema means weights hand off freely between PPO, AZ, and ExIt via `MCTSGNNAgent.from_checkpoint` / `GNNAgent.from_checkpoint`
+- **Region padding utility**: `parallel_risk/training/mcts_gnn/checkpoint_utils.py` zero-pads input/global projections when warm-starting from a checkpoint trained with fewer regions
 
-For a **simultaneous-move** game, we use the **Decoupled UCT** framework already implemented. The AlphaZero loop adapts naturally:
-1. MCTS (with GNN prior) plays self-play games
-2. Root visit distributions become policy targets; outcome is the value target
-3. GNN is trained to predict these targets
-4. Updated GNN replaces prior for next iteration of MCTS
+### Sub-step 1: Fair MCTS vs GNN baseline — DEFERRED
+The diagnostic script `experiments/diagnostic_mcts_gnn_vs_uniform.py` covers the head-to-head (MCTS-uniform-vs-uniform sanity, random-init MCTS+GNN vs MCTS-uniform, trained MCTS+GNN vs MCTS-uniform). Full budget-sweep comparison at multiple map sizes deferred pending the larger-map roster.
 
-### Step 1: Fair MCTS vs. GNN Baseline
-- Run MCTS (budget=200) against best GNN checkpoint on all maps
-- Establish the performance gap that Phase 3 aims to close
-- Visual: Elo comparison chart
+### Sub-steps 2, 3, 4, 5: AZ + ExIt implementation — COMPLETE ✓
+All committed on `mcts_gnn_selfplay`. Smoke tests in `tests/test_mcts_gnn_{agent,selfplay,exit}.py` all pass.
 
-### Step 2: MCTS Self-Play Data Generation
-- Implement data generation pipeline: MCTS self-play → `(state, policy_distribution, outcome)` tuples
-- Policy distribution = normalized visit counts at root
-- For simultaneous moves: record both agents' policy distributions per turn
-- Config: number of self-play games, MCTS budget per move, parallelism
+### Key findings from the diagnostic journey (documented in the commit message of `10d553d`)
 
-### Step 3: GNN Supervised Training
-- Train GNN to predict (policy distribution, value) from state
-- Loss: `L = α * KL(mcts_policy, gnn_policy) + β * MSE(outcome, gnn_value)`
-- Evaluate: does GNN policy start matching MCTS visit distributions?
+1. **Cold-start MCTS+GNN self-play fails on 9 diverse maps at budget=40**, regardless of loss function (AZ distillation OR ExIt). Root cause is environmental, not algorithmic: at cold-start, both self-play sides play too weakly to conquer within max_turns=40 on medium+ sized maps, so 100% of games truncate as draws (z=0), and the advantage signal collapses. Diagnostic script confirms: mask clamp rate <1%, code correct, value head DOES learn on `simple_6` where cold-start CAN produce decisive games.
 
-### Step 4: PUCT-Guided MCTS
-- Replace uniform prior in UCT with GNN policy network (PUCT formula)
-- GNN value network replaces random rollouts for leaf evaluation
-- With learned guidance, MCTS should achieve equivalent quality at lower budget
+2. **Warm-starting from the PPO checkpoint sidesteps cold-start.**
+   - Warm-start AZ (single map `simple_6`, 50 iters): eval 25% → 44% vs MCTS(uniform, budget=40) — **+19pp**.
+   - Warm-start ExIt (8 maps excluding `hex_grid_10` for ckpt dim compat, 50 iters): mean eval 15.6% → 19.8% (**+4.2pp**), peak 20.8% at iter 30. Substantial per-map gains: `simple_6` +9pp, `large_10` +16pp, `star_8` +17pp. Dashboard evidence: `experiments/mcts_gnn_exit_warm_start/dashboard.png`.
+   - 9-map warm-start ExIt convergence run (200 iters, with region-padded PPO checkpoint) in progress at time of writing.
 
-### Step 5: Iterative Self-Play Loop
-- Pipeline: self-play → data collection → GNN update → better prior → repeat
-- Track: GNN standalone win rate, MCTS(GNN) vs MCTS(uniform) at equal budget
-- Termination: convergence in Elo, or fixed number of iterations
+3. **MCTS at budget=40 is a bad wrapper for a good policy on these small state spaces.** PPO checkpoint alone scores ~94% vs MCTS-50, but wrapped in MCTS(budget=40) drops to 31.25% vs MCTS(uniform). The tree isn't deep enough for search-improvement over a good prior; it commits early to prior-preferred moves. This caps the achievable win-rate on `MCTS(GNN, budget=40) vs MCTS(uniform, budget=40)` regardless of training. **To honestly evaluate MCTS+GNN's value, use the roadmap's compute-efficiency metric (`MCTS(GNN, budget=X) vs MCTS(uniform, budget=4X)`) rather than same-budget comparison.**
 
-### Success Criteria
-- [ ] GNN alone (no search) approaches MCTS(budget=50) performance
-- [ ] MCTS(GNN, budget=50) beats MCTS(uniform, budget=200) — 4× compute efficiency
-- [ ] Self-play loop shows monotonic improvement over iterations
-- [ ] Generalizes: AlphaZero agent trained on small maps transfers to large maps
+### Success Criteria (revised, honest)
+- [x] AZ + ExIt training frameworks implemented, cross-compatible with PPO checkpoints
+- [x] PUCT + Dirichlet + temperature + visit-distribution + softmax-priors landed on `DuctMCTS`
+- [x] Warm-start AZ shows real learning on a single map (+19pp)
+- [x] Warm-start ExIt shows real learning on 8 maps (+4-17pp per-map)
+- [ ] **Convergence run** on all 9 maps with 200 iters — in progress
+- [ ] **Raw GNN policy** (no MCTS) from ExIt training evaluated vs MCTS-50 to compare against Phase 2.4 numbers (94/100/98%)
+- [ ] **Compute-efficiency metric**: MCTS(GNN, budget=40) vs MCTS(uniform, budget=200) — roadmap's actual "4× efficiency" success criterion. Meaningful because at budget=40 alone MCTS caps a good policy; a stronger opponent gives the GNN room to earn its keep.
+- [ ] Cold-start bootstrap via higher MCTS budget (200+) as a follow-up experiment — the honest test of whether AZ/ExIt can escape cold-start on this game at feasible compute.
 
 ---
 
-## Research Questions
+## Phase 4: Coevolutionary Self-Play — PLANNED
 
-1. Can a single GNN handle 6 to 50 territory maps without retraining? (Phase 2.4)
-2. What is the sample efficiency gain from graph inductive bias?
-3. Does AlphaZero-style training close the gap between GNN and MCTS? (Phase 3)
-4. Do learned PUCT priors produce qualitatively different search trees from uniform UCT?
-5. Does the AlphaZero GNN learn interpretable strategy concepts (attention on chokepoints)?
+### Motivation
+Round out the technique matrix with a population-based / evolutionary approach. Complementary to gradient-based methods: no need for well-defined gradients, natural fit for multi-agent competitive games, sidesteps some self-play mode-collapse pathologies via population diversity.
+
+### Reference
+- **Bauer, A.** "Artificial intelligence with graph neural networks applied to a risk-like board game." *IEEE Transactions on Games*, v. 16, n. 2, p. 342-351, **2024**.
+- **Bauer, A.** `py-risk` repo (2023). <https://github.com/andenrx/py-risk> — read this when nailing down the exact algorithmic recipe.
+
+Modern parallels for background: [Transformer Guided Coevolution](https://arxiv.org/pdf/2410.13769) (2024) and [Coevolutionary Deep RL](https://ieeexplore.ieee.org/document/9308290/) (2020).
+
+### Design space (to be pinned down from Bauer 2024 + py-risk repo)
+- **Individual encoding**: full GCN weights, a subset (last layer only?), or hyperparameters
+- **Population size**: 8-64
+- **Selection**: tournament, ranking, Pareto-based
+- **Variation operator**: Gaussian weight noise (ES-style), crossover between parents, or something Bauer-specific
+- **Fitness**: round-robin win-rate, Elo, top-K challenger vs incumbent
+- **Diversity pressure**: novelty search, quality-diversity, none
+- **Inner loop**: purely evolutionary, or hybrid with a short gradient descent per generation
+
+### Infrastructure fit (mostly already in place)
+- Checkpoints are the natural "individuals" — same schema across our tracks
+- Pairwise evaluation harness exists (used for MCTS+GNN vs MCTS(uniform))
+- Spawn-worker parallelism proven for parallel game evaluation
+- `MapRegistry` + `max_regions` padding means population members can train/eval on any map subset
+
+### To add
+- Population manager (checkpoint pool + fitness bookkeeping)
+- Matchmaking scheduler (round-robin or Elo-based challenger selection)
+- One or two variation operators (start with Gaussian noise)
+- Coevolution training script + config
+
+Rough estimate: 2-3 days of clean work once the specific Bauer recipe is nailed down.
+
+### Success Criteria
+- [ ] Coevolution training loop implemented, checkpoints cross-compatible with PPO/AZ/ExIt
+- [ ] Population converges to a Pareto front of strategies distinguishable qualitatively
+- [ ] Best coevolved agent competitive with best gradient-trained agent on a fair benchmark
+- [ ] Compute-efficiency comparison: coevolution vs PPO vs AZ vs ExIt at matched wall-clock
+
+---
+
+## Technique Inventory
+
+| Family | Track | Status | Where |
+|---|---|---|---|
+| Policy gradient (flat obs) | PPO + MLP via RLlib | ✓ Complete | `parallel_risk/training/rllib/` |
+| Policy gradient (graph obs) | PPO + GNN via TorchRL | ✓ Complete | `parallel_risk/training/torchrl/` |
+| Tree search baseline | Decoupled UCT | ✓ Complete | `parallel_risk/agents/mcts_agent.py` |
+| MCTS + neural, distillation | AZ-style visit-distribution distillation | ✓ Implementation | `parallel_risk/training/mcts_gnn/{self_play,trainer,train}.py` |
+| MCTS + neural, actor-critic | Expert Iteration (advantage-weighted) | ✓ Implementation | `parallel_risk/training/mcts_gnn/exit_{self_play,trainer,train}.py` |
+| Coevolutionary self-play | Bauer 2024 population-based | ✗ Planned (Phase 4) | TBD |
+
+**Cross-technique interop**: single checkpoint schema (`policy_state_dict` + `optimizer_state_dict` + `config` with embedded `max_regions`). Any checkpoint loads into any of the trainers via `MCTSGNNTrainer.load_checkpoint` / `ExitTrainer.load_checkpoint` / `MCTSGNNAgent.from_checkpoint` / `GNNAgent.from_checkpoint`, with region-width padding handled transparently.
+
+---
+
+## Engineering Roadmap
+
+Once the technique matrix is filled out (Phase 4 lands), the testbed becomes a serious research tool. To get there, invest in the following engineering axes.
+
+### Environment (`parallel_risk/env/`)
+- Consistent action-budget handling across configs (currently `action_budget=5` is hardcoded in many places; should scale with map size or be explicitly documented as fixed)
+- Env-side game recording (JSON per game with full state trajectory) for offline analysis + replay
+- Faster `env.step` if it becomes a bottleneck (profile first)
+- Env-level validation on submitted action arrays with clearer error messages
+- Metadata schema for maps: standard place to declare "difficulty", "expected turns", "region complexity" for cross-map analysis
+
+### GNN Architectures (`parallel_risk/models/`)
+- GCN baseline exists; add **GATv2** (attention-based message passing) as a comparison
+- Edge features (currently just adjacency): encode combat-strength differentials, income proximity, etc.
+- Deeper networks (currently 3 layers) — measure whether Parallel Risk actually needs long-range message passing
+- Explicit hyperparameter sweep infrastructure (Optuna? or just a simple grid script)
+
+### Maps (`parallel_risk/env/map_config.py`)
+- Colleague is expanding beyond the current 9 unique maps — good
+- **Larger maps (20-50+ territories)** — currently the state space is small enough that MCTS(uniform) is near-optimal and RL techniques don't differentiate. This is the single highest-leverage change for making the RL comparisons interesting.
+- **Procedural map generation** — parameterized generator producing arbitrary connected topologies with a target region schema, so we can create a proper zero-shot transfer test set
+- **Map difficulty calibration** — for each map, measure a "difficulty score" via how quickly MCTS(uniform, budget=200) vs random converges to a winner. Enables per-map fitness reporting instead of raw win-rate
+
+### Action Space
+- Higher `action_budget` (currently 5 slots per turn) — with more slots per turn the strategy space grows; likely necessary for larger maps
+- **Adaptive action budget**: budget scales with map size (e.g. `max(5, n_territories // 2)`)
+- Consider a **variable-length action space** where the number of slots per turn is dynamically chosen by the policy (currently fixed at 5)
+
+### RL / Training Infrastructure
+- **Unified benchmark script** — one entry point that runs any technique against any opponent on any map subset, produces a comparison dashboard. Removes per-technique custom eval scripts.
+- **Elo / Glicko ranking system** across snapshots — currently we measure raw win-rates; a proper ranking would let us track continuous improvement over long training runs.
+- **Standard hyperparameter naming** across the three trainers (currently PPOTrainer, MCTSGNNTrainer, ExitTrainer have slightly different config schemas)
+- **Shared "problem spec" YAML** (map roster + action budget + max_turns + network architecture) with thin per-technique overlays for the loss-specific hyperparameters
+- **Batched MCTS leaf evaluation** — queue K pending leaves and evaluate as one batch on GPU. Would substantially speed up MCTS+GNN training + inference and enable higher search budgets in practice.
+
+### Testing + CI
+- Cross-map smoke tests (currently many tests hardcode `simple_6`; should iterate over the full registry)
+- Determinism tests (given a seed, self-play must produce identical trajectories)
+- Regression tests on checkpoint interop (PPO → AZ → ExIt → back)
+
+---
+
+## Research Questions (updated)
+
+1. **Method comparison at scale**: on maps of increasing size and action-budget, at what point does MCTS+GNN training start earning its keep over direct PPO? Where does coevolutionary self-play win over gradient-based?
+2. **Topology-invariant learning via GNN**: can a single agent learn from a diverse map roster and zero-shot generalize to unseen topologies with different region schemas / degree distributions? (Phase 2.4 gave a promising 90% on unseen `large_10`; a proper study needs a bigger, more diverse test set.)
+3. **Compute-efficiency of learned search priors**: does MCTS(GNN, low budget) match MCTS(uniform, high budget)? What's the crossover budget ratio as a function of map complexity?
+4. **Interpretability**: does the trained GNN learn strategy concepts visible in its attention/message-passing patterns (chokepoint recognition, region completion, defensive lines)?
+5. **Coevolution vs gradient-based training**: do coevolved policies find qualitatively different strategies (Bauer 2024 vs our AZ/ExIt/PPO)? Are they more robust to distribution shift?
+6. **Novel algorithmic direction**: given all four techniques as baselines, is there a hybrid (e.g. PBT-wrapped ExIt, or MCTS-guided coevolution) that clearly beats each individual baseline?
 
 ---
 
@@ -225,11 +322,20 @@ For a **simultaneous-move** game, we use the **Decoupled UCT** framework already
 - [x] 99.5% win rate vs masked-random at budget=200
 - [ ] Fair comparison against best GNN checkpoint
 
-### Phase 3 (Targets)
-- [ ] Self-play data generation pipeline implemented
-- [ ] GNN supervised on MCTS data shows improved Elo vs. PPO-trained GNN
-- [ ] MCTS(GNN) achieves MCTS(uniform) quality at 4× lower budget
-- [ ] Paper submission to RL conference (ICLR, NeurIPS)
+### Phase 3 (updated 2026-09-08)
+- [x] Self-play data generation pipeline implemented (both AZ + ExIt variants)
+- [x] Training loops implemented and validated end-to-end (warm-start required at feasible compute)
+- [x] Warm-start AZ shows learning on single map (+19pp vs MCTS-uniform at same budget)
+- [x] Warm-start ExIt shows learning on 8 maps (+4-17pp per-map)
+- [ ] 9-map convergence run analyzed
+- [ ] Raw GNN (no MCTS) from ExIt training compared to PPO baseline
+- [ ] Compute-efficiency metric: MCTS(GNN, budget=40) vs MCTS(uniform, budget=200)
+- [ ] Paper submission — deferred to after Phase 4 + engineering roadmap complete; the meaningful contribution requires the full technique matrix + a proper empirical study on larger maps
+
+### Phase 4 (Coevolution, targets)
+- [ ] Bauer 2024 recipe implemented; population manager + matchmaking + variation operator
+- [ ] Coevolution checkpoints cross-compatible with existing tracks
+- [ ] Best coevolved agent competitive with best gradient-trained agent on a common benchmark
 
 ---
 
@@ -248,3 +354,4 @@ Beyond the roadmap phases above, potential extensions:
 - **2026-04-21:** Phase 1 complete, Phase 2 Steps 1-3 complete
 - **2026-09-03:** Phase 2 complete, MCTS complete; updated to reflect Phase 3 AlphaZero goals and Phase 2.4 multi-map as immediate next step
 - **2026-09-06:** Phase 2.4 (multi-map + transfer) marked complete; 3-map win rates 94/100/98% and 90% zero-shot transfer on `large_10` recorded; Future Work section added
+- **2026-09-08:** Phase 3 implementation landed (branch `mcts_gnn_selfplay`, commits 502ab75 + 10d553d): AZ distillation + Expert Iteration tracks + shared MCTSGNNAgent + PUCT/Dirichlet/temperature helpers + region-padded checkpoint interop. Diagnostic journey documented (cold-start collapse on 9 maps at budget=40 is environmental, warm-start from PPO works). Phase 4 (Coevolutionary self-play, Bauer 2024) added. Technique Inventory + Engineering Roadmap sections added. Research questions expanded to reflect the "engineering testbed → scientific contribution" framing.

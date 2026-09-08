@@ -27,8 +27,14 @@ def _action_to_key(action_dict: dict) -> tuple:
 
 
 def _key_to_action(key: tuple, max_actions: int = 10) -> dict:
-    """Reconstruct action dict from a hashable key."""
-    arr = np.zeros((max_actions, 3), dtype=np.int32)
+    """Reconstruct action dict from a hashable key.
+
+    The output array is sized `max(len(key), max_actions)` so keys longer
+    than the classic default of 10 (i.e. action_budget > 10) don't overflow.
+    Env consumers that expect a fixed shape can re-pad downstream.
+    """
+    size = max(len(key), max_actions)
+    arr = np.zeros((size, 3), dtype=np.int32)
     for i, (src, dst, troops) in enumerate(key):
         arr[i] = [src, dst, troops]
     return {'num_actions': len(key), 'actions': arr}

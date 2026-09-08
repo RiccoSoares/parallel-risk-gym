@@ -43,7 +43,8 @@ class GNNActionSampler:
     """
 
     def __init__(self, policy, decoder, map_config: MapConfig,
-                 action_budget: int, device, max_regions: int = None):
+                 action_budget: int, device, max_regions: int = None,
+                 max_actions_per_turn: int = None):
         self.policy = policy
         self.decoder = decoder
         self.map_config = map_config
@@ -51,6 +52,13 @@ class GNNActionSampler:
         self.device = device
         self.max_regions = (
             max_regions if max_regions is not None else len(map_config.regions)
+        )
+        # Env-side padding target. Must be >= action_budget. Default max(10,
+        # action_budget) matches the env's default max_actions_per_turn while
+        # scaling up automatically for K > 10.
+        self.max_actions_per_turn = (
+            max_actions_per_turn if max_actions_per_turn is not None
+            else max(10, action_budget)
         )
 
     def get_action_raw(self, obs: dict) -> dict:
@@ -70,7 +78,7 @@ class GNNActionSampler:
         )
 
         action_array_raw = actions_tensor[0].cpu().numpy()  # [action_budget, 3]
-        actions_array = np.zeros((10, 3), dtype=np.int32)
+        actions_array = np.zeros((self.max_actions_per_turn, 3), dtype=np.int32)
         actions_array[:self.action_budget] = action_array_raw.astype(np.int32)
         return {'num_actions': self.action_budget, 'actions': actions_array}
 
@@ -103,6 +111,7 @@ class MCTSGNNAgent:
         max_regions: int = None,
         pw_sampler: str = 'masked_random',
         use_value_fn: bool = True,
+        max_actions_per_turn: int = None,
     ):
         """
         pw_sampler:
@@ -141,6 +150,14 @@ class MCTSGNNAgent:
             max_regions if max_regions is not None else len(map_config.regions)
         )
         self.pw_sampler = pw_sampler
+        # Env-side padding target for returned actions. Defaults to
+        # max(10, action_budget) so K<=10 keeps the classic (10, 3) shape and
+        # K>10 automatically expands (env must also be constructed with a
+        # matching max_actions_per_turn).
+        self.max_actions_per_turn = (
+            max_actions_per_turn if max_actions_per_turn is not None
+            else max(10, action_budget)
+        )
 
         policy.eval()
 
@@ -151,6 +168,7 @@ class MCTSGNNAgent:
                 adjacency_matrix=map_config.adjacency_matrix,
                 action_budget=action_budget,
                 max_troops=max_troops,
+                max_actions_per_turn=self.max_actions_per_turn,
             )
         elif pw_sampler == 'gnn':
             sampler = GNNActionSampler(
@@ -160,6 +178,7 @@ class MCTSGNNAgent:
                 action_budget=action_budget,
                 device=self.device,
                 max_regions=self.max_regions,
+                max_actions_per_turn=self.max_actions_per_turn,
             )
         else:
             raise ValueError(f"pw_sampler must be 'masked_random' or 'gnn', got {pw_sampler}")

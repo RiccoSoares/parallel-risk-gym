@@ -160,6 +160,7 @@ class MaskedRandomAgentRLlib:
         adjacency_matrix: np.ndarray,
         action_budget: int = 5,
         max_troops: int = 20,
+        max_actions_per_turn: int = None,
     ):
         """
         Initialize masked random agent for RLlib.
@@ -169,11 +170,19 @@ class MaskedRandomAgentRLlib:
             adjacency_matrix: [n_territories, n_territories] adjacency matrix
             action_budget: Number of actions per turn
             max_troops: Maximum troops per action
+            max_actions_per_turn: Env-side padding target for get_action_raw's
+                output array. Must be >= action_budget. Default max(10,
+                action_budget) matches the env's default while scaling up
+                automatically for K > 10.
         """
         self.n_territories = n_territories
         self.adjacency_matrix = adjacency_matrix
         self.action_budget = action_budget
         self.max_troops = max_troops
+        self.max_actions_per_turn = (
+            max_actions_per_turn if max_actions_per_turn is not None
+            else max(10, action_budget)
+        )
 
     def get_action(self, observation: Dict[str, np.ndarray]) -> Tuple:
         """
@@ -238,7 +247,7 @@ class MaskedRandomAgentRLlib:
             Action dict with 'num_actions' and 'actions' array
         """
         actions_tuple = self.get_action(observation)
-        actions_array = np.zeros((10, 3), dtype=np.int32)
+        actions_array = np.zeros((self.max_actions_per_turn, 3), dtype=np.int32)
         for i, (src, dst, troops) in enumerate(actions_tuple):
             actions_array[i] = [src, dst, troops]
 

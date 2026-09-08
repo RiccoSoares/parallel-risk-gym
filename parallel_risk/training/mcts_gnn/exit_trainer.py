@@ -193,18 +193,16 @@ class ExitTrainer:
         advantages = (advantages - adv_mean) / (adv_std + 1e-8)
 
         # Log-probs of the expert (MCTS-selected) actions under the current policy.
-        log_probs = self.decoder.compute_log_probs(
+        # Per-slot clamp (BEFORE the sum) so the numerical floor scales with
+        # action_budget instead of clipping natural joint log-probs at larger K.
+        # Each slot's natural log-prob is roughly -log(n_choices_per_slot) ~-8
+        # for our action space; floor at -10 keeps real probabilities above
+        # ~4.5e-5 while still trapping the -1e10 mask sentinel.
+        per_slot_log_probs = self.decoder.compute_log_probs(
             action_logits, actions_flat, mega_batch.batch,
             observations=graphs,
-        ).sum(dim=1)  # [N]
-
-        # Clamp to a numerical floor. The decoder uses a very negative
-        # sentinel (~-1e10) for masked-illegal action components; if MCTS
-        # ever selects an action the decoder judges masked (validator vs
-        # decoder disagreement on edge cases), we'd otherwise blow up
-        # policy_loss by ~10 orders of magnitude. Floor of -20 represents
-        # "probability ~2e-9" — effectively "never" — without wrecking scale.
-        log_probs = log_probs.clamp(min=-20.0)
+        ).clamp(min=-10.0)  # [N, action_budget]
+        log_probs = per_slot_log_probs.sum(dim=1)  # [N]
 
         policy_loss = -(log_probs * advantages).mean()
 
@@ -258,12 +256,23 @@ class ExitTrainer:
         }, path)
 
     def load_checkpoint(self, path: Path, load_optimizer: bool = True) -> int:
+        from parallel_risk.training.mcts_gnn.checkpoint_utils import (
+            load_state_dict_with_region_padding,
+        )
         ckpt = torch.load(Path(path), map_location=self.device)
-        self.policy.load_state_dict(ckpt['policy_state_dict'])
+        # Zero-pad input/global projection weights when warm-starting from a
+        # checkpoint trained with fewer regions (e.g. PPO ckpt trained on
+        # max_regions=3 loaded into an ExitTrainer built with max_regions=4
+        # because the map set includes hex_grid_10). Padded channels start
+        # as no-ops and learn during training.
+        load_state_dict_with_region_padding(self.policy, ckpt['policy_state_dict'])
         if load_optimizer and 'optimizer_state_dict' in ckpt:
             try:
                 self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             except (ValueError, KeyError):
+                # PPO Adam moments have shapes tied to the source input-dims
+                # so they won't match after padding. Silently drop optimizer
+                # state — fresh Adam moments are the safer choice anyway.
                 pass
         return int(ckpt.get('iteration', 0))
 
