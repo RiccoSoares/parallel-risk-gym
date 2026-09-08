@@ -585,6 +585,799 @@ def create_dense_12_map():
 
 
 # ---------------------------------------------------------------------------
+# New medium maps (15-25 territories)
+# ---------------------------------------------------------------------------
+
+def create_hex_grid_18_map():
+    """3x6 hex-like grid (rectangular grid + SE diagonals).
+
+    Layout (rows top to bottom, mirror axis is horizontal midline):
+
+        row 0 (agent_0):    [ 0] [ 1] [ 2] [ 3] [ 4] [ 5]
+        row 1 (mixed):      [ 6] [ 7] [ 8] | [ 9] [10] [11]
+        row 2 (agent_1):    [12] [13] [14] [15] [16] [17]
+
+    Mirror pairing: i <-> 17 - i (row 0 <-> row 2 reversed; row 1 splits at
+    the vertical midline). Row 1 nodes {6,7,8} start with agent_0; {9,10,11}
+    with agent_1, giving a natural front line down the middle.
+
+    Edges (all bidirectional):
+        Horizontal (per row): 0-1, 1-2, 2-3, 3-4, 4-5;  6-7, 7-8, 8-9, 9-10,
+            10-11;  12-13, 13-14, 14-15, 15-16, 16-17.
+        Vertical (row_r - row_{r+1}): (0,6)..(5,11);  (6,12)..(11,17).
+        SE diagonals (i, i+7) row 0 -> row 1: 0-7, 1-8, 2-9, 3-10, 4-11.
+        SE diagonals row 1 -> row 2: 6-13, 7-14, 8-15, 9-16, 10-17.
+
+    Regions:
+        north  = [0..5]   bonus 5 (top row, mirror-pair of south)
+        middle = [6..11]  bonus 4 (contested middle row, self-mirror)
+        south  = [12..17] bonus 5 (bottom row)
+    """
+    n = 18
+    half_adj = {
+        0: [1, 6, 7],
+        1: [0, 2, 7, 8],
+        2: [1, 3, 8],
+        3: [2, 4],
+        4: [3, 5],
+        5: [4],
+        6: [0, 1, 7],
+        7: [1, 2, 6, 8],
+        8: [2, 7],
+    }
+    # Cross edges: connect agent_0 half (< 9) to agent_1 half (>= 9).
+    # Verticals row1->row2 (partial), row0->row1 middle, SE diagonals.
+    cross_edges = [
+        # Row 1 middle horizontal
+        (8, 9),
+        # Verticals row0 -> row1 (right half of row 1)
+        (3, 10), (4, 11),
+        # Verticals row1 -> row2 (agent_0 row-1 nodes to agent_1 row-2 nodes)
+        (6, 12), (7, 13), (8, 14),
+        # SE diagonals row0 -> row1 (right half)
+        (3, 9), (4, 10), (5, 11),
+        # SE diagonals row1 -> row2 (agent_0 row-1 nodes to agent_1 row-2 nodes)
+        (6, 13), (7, 14), (8, 15),
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'north':  [0, 1, 2, 3, 4, 5],
+        'middle': [6, 7, 8, 9, 10, 11],
+        'south':  [12, 13, 14, 15, 16, 17],
+    }
+    region_bonuses = {'north': 5, 'middle': 4, 'south': 5}
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+def create_grid_20_map():
+    """4x5 rectangular grid (20 territories, no diagonals).
+
+    Layout:
+        row 0 (agent_0):  [ 0] [ 1] [ 2] [ 3] [ 4]
+        row 1 (agent_0):  [ 5] [ 6] [ 7] [ 8] [ 9]
+        row 2 (agent_1):  [10] [11] [12] [13] [14]
+        row 3 (agent_1):  [15] [16] [17] [18] [19]
+
+    Mirror pairing i <-> 19 - i pairs row 0 <-> row 3 reversed and
+    row 1 <-> row 2 reversed. Front line runs between rows 1 and 2.
+
+    Edges:
+        Horizontal: standard row edges per row.
+        Vertical:   (0,5), (1,6) ... (14,19).
+
+    Regions (all bonus scaled by size):
+        north      = [0..4]    bonus 3
+        north_mid  = [5..9]    bonus 4  (agent_0 front line)
+        south_mid  = [10..14]  bonus 4  (agent_1 front line, mirror of north_mid)
+        south      = [15..19]  bonus 3  (mirror of north)
+    """
+    n = 20
+    half_adj = {
+        # row 0 horizontal
+        0: [1, 5],
+        1: [0, 2, 6],
+        2: [1, 3, 7],
+        3: [2, 4, 8],
+        4: [3, 9],
+        # row 1 horizontal
+        5: [0, 6],
+        6: [1, 5, 7],
+        7: [2, 6, 8],
+        8: [3, 7, 9],
+        9: [4, 8],
+    }
+    # Cross edges: verticals row1 -> row2 (all self-mirror since 5+14=19 etc.)
+    cross_edges = [
+        (5, 14), (6, 13), (7, 12), (8, 11), (9, 10),
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'north':      [0, 1, 2, 3, 4],
+        'north_mid':  [5, 6, 7, 8, 9],
+        'south_mid':  [10, 11, 12, 13, 14],
+        'south':      [15, 16, 17, 18, 19],
+    }
+    region_bonuses = {'north': 3, 'north_mid': 4, 'south_mid': 4, 'south': 3}
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+def create_corridor_20_map():
+    """20-territory corridor + flanks: two wheel-continents joined by a corridor.
+
+    Layout:
+
+        NORTH continent (0..5) = wheel W5 (pentagon 0-1-2-3-4 + hub 5)
+
+              [1]---[2]
+              /  \\ / \\
+             [0]--[5]--[3]
+              \\  / \\ /
+              [4]---(3)          (edges 5-0, 5-1, 5-2, 5-3, 5-4 not all drawn)
+
+        Corridor chain: 5 - 6 - 7 - 8 - 9 - 10 - 11 - 12 - 13 - 14
+        (agent_0 nodes 6-9, agent_1 nodes 10-13, chokepoint bridge at 9-10.)
+
+        SOUTH continent (14..19) = mirror wheel (hub 14, rim 15-19).
+
+    Regions:
+        north     = [0..5]     bonus 5
+        south     = [14..19]   bonus 5  (mirror of north)
+        corridor  = [6..13]    bonus 4  (self-mirror; owning it grants a solid income)
+    """
+    n = 20
+    half_adj = {
+        # Pentagon rim
+        0: [1, 4, 5],
+        1: [0, 2, 5],
+        2: [1, 3, 5],
+        3: [2, 4, 5],
+        4: [0, 3, 5],
+        # Hub 5 (connects to whole pentagon + corridor entry)
+        5: [0, 1, 2, 3, 4, 6],
+        # Corridor chain (agent_0 side)
+        6: [5, 7],
+        7: [6, 8],
+        8: [7, 9],
+        9: [8],
+    }
+    # Cross edges: corridor bridge in the middle (self-mirror)
+    cross_edges = [
+        (9, 10),
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'north':    [0, 1, 2, 3, 4, 5],
+        'corridor': [6, 7, 8, 9, 10, 11, 12, 13],
+        'south':    [14, 15, 16, 17, 18, 19],
+    }
+    region_bonuses = {'north': 5, 'corridor': 4, 'south': 5}
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+def create_corridor_22_map():
+    """22-territory map with TWO parallel corridors between two continents.
+
+    Two chokepoints instead of one — encourages splitting forces or committing
+    to a single axis of advance.
+
+    Layout:
+
+        NORTH continent (0..4) = pentagon with hub structure:
+            0-1-2-3-4 (pentagon), plus edges 0-2 and 2-4 for extra connectivity.
+            Node 2 (apex) is the internal hub; nodes 2 and 4 gate the corridors.
+
+        Upper corridor (agent_0 side):  2 - 5 - 6 - 7
+        Lower corridor (agent_0 side):  4 - 8 - 9 - 10
+        Bridge to agent_1: 7 - 14 (upper), 10 - 11 (lower).
+        Upper corridor (agent_1 side): 14 - 15 - 16 - 19  (mirror of 7-6-5-2)
+        Lower corridor (agent_1 side): 11 - 12 - 13 - 17  (mirror of 10-9-8-4)
+
+        SOUTH continent (17..21) = mirror of north.
+
+    Regions:
+        north           = [0..4]        bonus 4
+        south           = [17..21]      bonus 4  (mirror)
+        upper_corridor  = [5,6,7,14,15,16] bonus 3 (self-mirror)
+        lower_corridor  = [8,9,10,11,12,13] bonus 3 (self-mirror)
+    """
+    n = 22
+    half_adj = {
+        # North continent (pentagon + 2 chords)
+        0: [1, 4],
+        1: [0, 2],
+        2: [1, 3, 0, 5],   # apex + upper corridor entry
+        3: [2, 4],
+        4: [0, 3, 2, 8],   # + lower corridor entry (also chord 2-4)
+        # Upper corridor
+        5: [2, 6],
+        6: [5, 7],
+        7: [6],
+        # Lower corridor
+        8: [4, 9],
+        9: [8, 10],
+        10: [9],
+    }
+    cross_edges = [
+        (7, 14),   # upper corridor bridge (self-mirror: mirror(7)=14)
+        (10, 11),  # lower corridor bridge (self-mirror: mirror(10)=11)
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'north':           [0, 1, 2, 3, 4],
+        'south':           [17, 18, 19, 20, 21],
+        'upper_corridor':  [5, 6, 7, 14, 15, 16],
+        'lower_corridor':  [8, 9, 10, 11, 12, 13],
+    }
+    region_bonuses = {
+        'north': 4, 'south': 4,
+        'upper_corridor': 3, 'lower_corridor': 3,
+    }
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+def create_hub_spoke_16_map():
+    """16-territory dual-hub-per-side map (compact hub-and-spoke).
+
+    Each side has two hubs joined together, with a small ring of 3 spokes
+    around each hub. Cross-half connections at all three natural axes.
+
+    Layout (agent_0 half nodes 0..7):
+
+            Hub A (0)                       Hub B (4)
+             /|\\                            /|\\
+            / | \\                          / | \\
+          [1]-[2]-[3]                    [5]-[6]-[7]
+                \\____________________________/
+                       0-4 internal link (both hubs connected)
+
+    Mirror pairs: 0<->15 (hub A left-right), 4<->11 (hub B), etc.
+
+    Cross bridges (self-mirror): 3-12 (spoke bridge on A side),
+        4-11 (hub B bridge), 7-8 (spoke bridge on B side).
+
+    Regions:
+        left_A  = [0,1,2,3] bonus 3     ↔  right_A = [12,13,14,15] bonus 3
+        left_B  = [4,5,6,7] bonus 3     ↔  right_B = [8,9,10,11] bonus 3
+    """
+    n = 16
+    half_adj = {
+        0: [1, 2, 3, 4],   # hub A + link to hub B
+        1: [0, 2],
+        2: [0, 1, 3],
+        3: [0, 2],
+        4: [0, 5, 6, 7],   # hub B + link to hub A
+        5: [4, 6],
+        6: [4, 5, 7],
+        7: [4, 6],
+    }
+    cross_edges = [
+        (3, 12),  # spoke-to-spoke bridge on the "A" axis (mirror(3)=12)
+        (4, 11),  # hub-B bridge (mirror(4)=11)
+        (7, 8),   # spoke-to-spoke bridge on the "B" axis (mirror(7)=8)
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'left_A':  [0, 1, 2, 3],
+        'left_B':  [4, 5, 6, 7],
+        'right_B': [8, 9, 10, 11],
+        'right_A': [12, 13, 14, 15],
+    }
+    region_bonuses = {'left_A': 3, 'left_B': 3, 'right_B': 3, 'right_A': 3}
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+def create_dual_hub_20_map():
+    """20-territory dual-hub-per-side map with 4-spoke rings.
+
+    Larger version of hub_spoke_16: each side has two hubs, and each hub
+    supports a 4-node ring of spokes. Multiple cross-half routes.
+
+    Layout (agent_0 half nodes 0..9):
+
+        Hub A (0)  spokes {1,2,3,4} arranged in a 4-cycle
+        Hub B (5)  spokes {6,7,8,9} arranged in a 4-cycle
+        Internal link: 0-5 (hub-hub)
+
+    Cross bridges (all self-mirror under i <-> 19-i):
+        (0,19): hub A cross-bridge
+        (4,15): spoke bridge on A side
+        (5,14): hub B cross-bridge
+        (9,10): spoke bridge on B side
+
+    Regions:
+        left_A  = [0,1,2,3,4] bonus 3  ↔  right_A = [15..19] bonus 3
+        left_B  = [5,6,7,8,9] bonus 3  ↔  right_B = [10..14] bonus 3
+    """
+    n = 20
+    half_adj = {
+        # Hub A + spoke ring
+        0: [1, 2, 3, 4, 5],
+        1: [0, 2, 4],
+        2: [0, 1, 3],
+        3: [0, 2, 4],
+        4: [0, 1, 3],
+        # Hub B + spoke ring
+        5: [0, 6, 7, 8, 9],
+        6: [5, 7, 9],
+        7: [5, 6, 8],
+        8: [5, 7, 9],
+        9: [5, 6, 8],
+    }
+    cross_edges = [
+        (0, 19),  # hub A bridge
+        (4, 15),  # A spoke bridge
+        (5, 14),  # hub B bridge
+        (9, 10),  # B spoke bridge
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'left_A':  [0, 1, 2, 3, 4],
+        'left_B':  [5, 6, 7, 8, 9],
+        'right_B': [10, 11, 12, 13, 14],
+        'right_A': [15, 16, 17, 18, 19],
+    }
+    region_bonuses = {'left_A': 3, 'left_B': 3, 'right_B': 3, 'right_A': 3}
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+def create_ring_cross_18_map():
+    """18-node ring (C18) with mirror-symmetric interior chords.
+
+    Layout:
+
+              0 -- 1 -- 2 -- 3 -- 4 -- 5 -- 6 -- 7 -- 8
+              |                                        |
+             17                                        9
+              |                                        |
+             16 - 15 - 14 - 13 - 12 - 11 - 10 -------/
+
+    Ring order: 0-1-...-17-0. Cross chords (all self-mirror under i <-> 17-i):
+        (2, 15), (4, 13), (6, 11).
+
+    The chords cut down the "diameter" of the ring while preserving reflective
+    symmetry. Regions form three self-mirror arcs of size 6.
+
+    Regions:
+        north_arc  = [0,1,2,15,16,17]     bonus 4  (self-mirror)
+        middle_arc = [3,4,5,12,13,14]     bonus 4  (self-mirror)
+        south_arc  = [6,7,8,9,10,11]      bonus 4  (self-mirror)
+    """
+    n = 18
+    half_adj = {
+        0: [1],
+        1: [0, 2],
+        2: [1, 3],
+        3: [2, 4],
+        4: [3, 5],
+        5: [4, 6],
+        6: [5, 7],
+        7: [6, 8],
+        8: [7],
+    }
+    cross_edges = [
+        (0, 17),  # close the ring on the "north" side
+        (8, 9),   # close the ring on the "south" side
+        (2, 15),  # north chord
+        (4, 13),  # middle chord
+        (6, 11),  # south chord
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'north_arc':  [0, 1, 2, 15, 16, 17],
+        'middle_arc': [3, 4, 5, 12, 13, 14],
+        'south_arc':  [6, 7, 8, 9, 10, 11],
+    }
+    region_bonuses = {'north_arc': 4, 'middle_arc': 4, 'south_arc': 4}
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+def create_dense_mesh_16_map():
+    """16-territory dense mesh: two K4's per side joined by a perfect matching.
+
+    Layout (agent_0 half nodes 0..7):
+
+        Upper K4:   {0, 1, 2, 3}   (fully connected)
+        Lower K4:   {4, 5, 6, 7}   (fully connected)
+        Matching:   0-4, 1-5, 2-6, 3-7
+
+    Mirror i <-> 15-i pairs {0..7} with {15..8}. Cross bridges (self-mirror):
+        (0, 15), (3, 12), (4, 11), (7, 8).
+
+    Highest per-node degree of any map at its size — many redundant paths,
+    no chokepoints. Contrasts with the sparser corridor-based maps.
+
+    Regions:
+        left_top  = [0,1,2,3] bonus 3   ↔  right_top = [12,13,14,15] bonus 3
+        left_bot  = [4,5,6,7] bonus 3   ↔  right_bot = [8,9,10,11] bonus 3
+    """
+    n = 16
+    half_adj = {
+        # Upper K4
+        0: [1, 2, 3, 4],
+        1: [0, 2, 3, 5],
+        2: [0, 1, 3, 6],
+        3: [0, 1, 2, 7],
+        # Lower K4
+        4: [0, 5, 6, 7],
+        5: [1, 4, 6, 7],
+        6: [2, 4, 5, 7],
+        7: [3, 4, 5, 6],
+    }
+    cross_edges = [
+        (0, 15), (3, 12), (4, 11), (7, 8),
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'left_top':  [0, 1, 2, 3],
+        'left_bot':  [4, 5, 6, 7],
+        'right_bot': [8, 9, 10, 11],
+        'right_top': [12, 13, 14, 15],
+    }
+    region_bonuses = {
+        'left_top': 3, 'left_bot': 3, 'right_bot': 3, 'right_top': 3,
+    }
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+def create_bipartite_20_map():
+    """20-territory bipartite / split-continent map.
+
+    Two mostly-independent 'continents' each straddle the front line and are
+    joined internally by a single edge on each side. Encourages committing to
+    one continent early or splitting attention.
+
+    Layout (agent_0 half nodes 0..9):
+
+        Continent A (top): pentagon {0,1,2,3,4} with chords 0-2 and 2-4.
+        Continent B (bot): pentagon {5,6,7,8,9} with chords 5-7 and 7-9.
+        Inter-continent link (agent_0 side): 4 - 5.
+
+    Cross bridges (self-mirror):
+        (0, 19)  -- continent A cross-half bridge
+        (9, 10)  -- continent B cross-half bridge
+
+    NOTE: continents are only joined by the 4-5 edge (and its mirror 15-14),
+    plus the two cross bridges — so control of a whole continent is a real
+    strategic goal, not incidental.
+
+    Regions (mirror i <-> 19-i pairs [0,1,2]<->[17,18,19] and [5,6,7]<->[12,13,14]):
+        A_left  = [0,1,2]     bonus 2   ↔  A_right = [17,18,19] bonus 2
+        B_left  = [5,6,7]     bonus 2   ↔  B_right = [12,13,14] bonus 2
+        (Nodes 3,4,8,9 and their mirrors 10,11,15,16 are "frontier" nodes
+         without a regional bonus, incentivizing pushes but not guaranteeing
+         income.)
+    """
+    n = 20
+    half_adj = {
+        # Continent A pentagon + chords
+        0: [1, 4, 2],
+        1: [0, 2],
+        2: [0, 1, 3, 4],
+        3: [2, 4],
+        4: [0, 2, 3, 5],   # + inter-continent link
+        # Continent B pentagon + chords
+        5: [4, 6, 9, 7],
+        6: [5, 7],
+        7: [5, 6, 8, 9],
+        8: [7, 9],
+        9: [5, 7, 8],
+    }
+    cross_edges = [
+        (0, 19),   # A cross bridge (self-mirror)
+        (9, 10),   # B cross bridge (self-mirror)
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'A_left':  [0, 1, 2],
+        'A_right': [17, 18, 19],
+        'B_left':  [5, 6, 7],
+        'B_right': [12, 13, 14],
+    }
+    region_bonuses = {
+        'A_left': 2, 'A_right': 2, 'B_left': 2, 'B_right': 2,
+    }
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+# ---------------------------------------------------------------------------
+# New large maps (28-35 territories)
+# ---------------------------------------------------------------------------
+
+def create_grid_30_map():
+    """5x6 rectangular grid (30 territories, no diagonals).
+
+    Layout (rows top to bottom):
+
+        row 0 (agent_0):  [ 0] [ 1] [ 2] [ 3] [ 4] [ 5]
+        row 1 (agent_0):  [ 6] [ 7] [ 8] [ 9] [10] [11]
+        row 2 (mixed):    [12] [13] [14] | [15] [16] [17]
+        row 3 (agent_1):  [18] [19] [20] [21] [22] [23]
+        row 4 (agent_1):  [24] [25] [26] [27] [28] [29]
+
+    Mirror i <-> 29-i pairs row 0 <-> row 4 (reversed), row 1 <-> row 3
+    (reversed), row 2 splits vertically at the midline.
+
+    Standard 4-neighbor grid edges (horizontal + vertical).
+
+    Regions:
+        r0 = [0..5]    bonus 3   ↔  r4 = [24..29] bonus 3
+        r1 = [6..11]   bonus 3   ↔  r3 = [18..23] bonus 3
+        center = [12..17] bonus 4 (self-mirror; owning the middle row is valuable)
+    """
+    n = 30
+    half_adj = {
+        # row 0 horizontal + row 0->1 vertical
+        0: [1, 6],
+        1: [0, 2, 7],
+        2: [1, 3, 8],
+        3: [2, 4, 9],
+        4: [3, 5, 10],
+        5: [4, 11],
+        # row 1 horizontal + row 1->2 vertical (partial: only 12,13,14)
+        6: [0, 7, 12],
+        7: [1, 6, 8, 13],
+        8: [2, 7, 9, 14],
+        9: [3, 8, 10],
+        10: [4, 9, 11],
+        11: [5, 10],
+        # row 2 partial horizontal (12-13, 13-14)
+        12: [6, 13],
+        13: [7, 12, 14],
+        14: [8, 13],
+    }
+    cross_edges = [
+        # row 2 midline horizontal
+        (14, 15),
+        # row 1 -> row 2 vertical (right half of row 2)
+        (9, 15), (10, 16), (11, 17),
+        # row 2 -> row 3 vertical (agent_0 row-2 nodes to agent_1 row-3 nodes)
+        (12, 18), (13, 19), (14, 20),
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'row0':   [0, 1, 2, 3, 4, 5],
+        'row1':   [6, 7, 8, 9, 10, 11],
+        'center': [12, 13, 14, 15, 16, 17],
+        'row3':   [18, 19, 20, 21, 22, 23],
+        'row4':   [24, 25, 26, 27, 28, 29],
+    }
+    region_bonuses = {
+        'row0': 3, 'row1': 3, 'center': 4, 'row3': 3, 'row4': 3,
+    }
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+def create_corridor_28_map():
+    """28-territory corridor map with dual corridors + wheel continents.
+
+    Layout:
+
+        NORTH continent (0..6): wheel W6 (hexagon 0-1-2-3-4-5 + inner hub 6).
+        Upper corridor (agent_0 side): 5 - 7 - 8 - 9 - 10
+        Lower corridor (agent_0 side): 4 - 11 - 12 - 13
+        SOUTH continent (21..27): mirror of north (hub 21, rim 22..27).
+        Upper corridor (agent_1 side): 17 - 18 - 19 - 20 - 22 (mirror of 10-9-8-7-5)
+        Lower corridor (agent_1 side): 14 - 15 - 16 - 23      (mirror of 13-12-11-4)
+
+    Cross bridges (self-mirror under i <-> 27-i):
+        (10, 17): upper corridor chokepoint  (mirror(10)=17)
+        (13, 14): lower corridor chokepoint  (mirror(13)=14)
+
+    Regions:
+        north = [0..6] bonus 5  ↔  south = [21..27] bonus 5
+        upper = [7,8,9,10,17,18,19,20] bonus 4 (self-mirror)
+        lower = [11,12,13,14,15,16] bonus 3 (self-mirror)
+    """
+    n = 28
+    half_adj = {
+        # Hexagon rim
+        0: [1, 5, 6],
+        1: [0, 2, 6],
+        2: [1, 3, 6],
+        3: [2, 4, 6],
+        4: [3, 5, 6, 11],   # + lower corridor entry
+        5: [0, 4, 6, 7],    # + upper corridor entry
+        # Wheel hub
+        6: [0, 1, 2, 3, 4, 5],
+        # Upper corridor (agent_0 side)
+        7: [5, 8],
+        8: [7, 9],
+        9: [8, 10],
+        10: [9],
+        # Lower corridor (agent_0 side)
+        11: [4, 12],
+        12: [11, 13],
+        13: [12],
+    }
+    cross_edges = [
+        (10, 17),  # upper bridge (self-mirror)
+        (13, 14),  # lower bridge (self-mirror)
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'north':           [0, 1, 2, 3, 4, 5, 6],
+        'south':           [21, 22, 23, 24, 25, 26, 27],
+        'upper_corridor':  [7, 8, 9, 10, 17, 18, 19, 20],
+        'lower_corridor':  [11, 12, 13, 14, 15, 16],
+    }
+    region_bonuses = {
+        'north': 5, 'south': 5,
+        'upper_corridor': 4, 'lower_corridor': 3,
+    }
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+def create_hub_ring_30_map():
+    """30-territory ring + inner hub cluster (mixed hub+ring style).
+
+    Layout:
+
+        Outer ring of 24 nodes: 0-1-2-...-11 (agent_0 arc), 18-19-...-29 (agent_1 arc),
+            closed via cross edges 0-29 and 11-18.
+        Inner hubs (6 nodes): 12,13,14 (agent_0) and 15,16,17 (agent_1) forming a K3+K3
+            with a bridge between the halves.
+
+        Each hub connects to a 4-node arc of the outer ring:
+            hub 12 <-> ring {0, 1, 2, 3}
+            hub 13 <-> ring {4, 5, 6, 7}
+            hub 14 <-> ring {8, 9, 10, 11}
+        Mirrored on the agent_1 side (hubs 17, 16, 15 respectively).
+
+    Mirror i <-> 29-i:  ring 0..11 <-> 29..18 (reversed), hubs 12,13,14 <-> 17,16,15.
+
+    Cross bridges (all self-mirror):
+        (0, 29), (11, 18)   -- close the outer ring
+        (14, 15)            -- hub cluster bridge
+
+    Regions:
+        ring_left  = [0..11]      bonus 5
+        ring_right = [18..29]     bonus 5   (mirror of ring_left)
+        hubs       = [12..17]     bonus 4   (self-mirror inner cluster)
+    """
+    n = 30
+    half_adj = {
+        # Outer ring chain 0-11 (agent_0)
+        0: [1, 12],
+        1: [0, 2, 12],
+        2: [1, 3, 12],
+        3: [2, 4, 12],
+        4: [3, 5, 13],
+        5: [4, 6, 13],
+        6: [5, 7, 13],
+        7: [6, 8, 13],
+        8: [7, 9, 14],
+        9: [8, 10, 14],
+        10: [9, 11, 14],
+        11: [10, 14],
+        # Inner hubs form a K3 among themselves
+        12: [0, 1, 2, 3, 13, 14],
+        13: [4, 5, 6, 7, 12, 14],
+        14: [8, 9, 10, 11, 12, 13],
+    }
+    cross_edges = [
+        (0, 29),   # close outer ring "north" (self-mirror)
+        (11, 18),  # close outer ring "south" (self-mirror)
+        (14, 15),  # hub cluster bridge (self-mirror)
+    ]
+    adjacency_list, adjacency_matrix, initial_ownership = _mirror_half(
+        n, half_adj, cross_edges
+    )
+    regions = {
+        'ring_left':  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        'ring_right': [18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29],
+        'hubs':       [12, 13, 14, 15, 16, 17],
+    }
+    region_bonuses = {'ring_left': 5, 'ring_right': 5, 'hubs': 4}
+    return MapConfig(
+        n_territories=n,
+        adjacency_list=adjacency_list,
+        adjacency_matrix=adjacency_matrix,
+        initial_ownership=initial_ownership,
+        regions=regions,
+        region_bonuses=region_bonuses,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -598,6 +1391,20 @@ MapRegistry.register("star_8", create_star_8_map)
 MapRegistry.register("double_hub_8", create_double_hub_8_map)
 MapRegistry.register("hex_grid_10", create_hex_grid_10_map)
 MapRegistry.register("dense_12", create_dense_12_map)
+# New medium maps (9)
+MapRegistry.register("hex_grid_18", create_hex_grid_18_map)
+MapRegistry.register("grid_20", create_grid_20_map)
+MapRegistry.register("corridor_20", create_corridor_20_map)
+MapRegistry.register("corridor_22", create_corridor_22_map)
+MapRegistry.register("hub_spoke_16", create_hub_spoke_16_map)
+MapRegistry.register("dual_hub_20", create_dual_hub_20_map)
+MapRegistry.register("ring_cross_18", create_ring_cross_18_map)
+MapRegistry.register("dense_mesh_16", create_dense_mesh_16_map)
+MapRegistry.register("bipartite_20", create_bipartite_20_map)
+# New large maps (3)
+MapRegistry.register("grid_30", create_grid_30_map)
+MapRegistry.register("corridor_28", create_corridor_28_map)
+MapRegistry.register("hub_ring_30", create_hub_ring_30_map)
 
 
 # ---------------------------------------------------------------------------
