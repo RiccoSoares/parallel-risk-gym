@@ -1,4 +1,16 @@
-# Multi-map GNN training — trains a single GNN across all available maps
+# Multi-map GNN training — trains a single GNN across the listed maps.
+#
+# map_names: any subset of the registered maps in
+#   parallel_risk/env/map_config.py (currently: simple_6, medium_8, large_10,
+#   triangle_6, ring_6, star_8, double_hub_8, hex_grid_10, dense_12).
+#   Aliases (e.g. basic_6) should not be listed to avoid double-sampling.
+#   Validate any custom set with:
+#     python parallel_risk/env/map_config.py
+#
+# action_budget: single scalar shared across all rollout envs. For a mixed
+#   training set with larger maps (e.g. dense_12+), consider bumping this
+#   above 5 — the experiments/multi_map_training.py driver auto-computes
+#   max(5, max_n // 3) when --action-budget=auto.
 
 env:
   map_names: ["simple_6", "medium_8", "large_10"]

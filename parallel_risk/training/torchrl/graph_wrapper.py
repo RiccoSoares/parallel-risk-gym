@@ -26,7 +26,8 @@ from parallel_risk.env.map_config import MapConfig
 def env_to_graph(
     obs: Dict[str, Any],
     map_config: MapConfig,
-    device: Optional[torch.device] = None
+    device: Optional[torch.device] = None,
+    max_regions: Optional[int] = None,
 ) -> Data:
     """
     Convert environment observation to PyTorch Geometric graph.
@@ -35,7 +36,7 @@ def env_to_graph(
     - troops (normalized)
     - ownership (+1 self, -1 enemy, 0 neutral)
     - in_degree (number of adjacent territories)
-    - region_id (one-hot encoded)
+    - region_id (one-hot encoded, padded to max_regions)
 
     Args:
         obs: Observation dict from ParallelRiskEnv with keys:
@@ -47,6 +48,11 @@ def env_to_graph(
             - region_control: (n_regions,) int8 array
         map_config: MapConfig with adjacency information and regions
         device: Torch device (cpu/cuda)
+        max_regions: Pad region one-hot node features and the region_control
+            global feature to this width. Required for multi-map training
+            where different maps have different region counts so all rollouts
+            emit the same feature dimensionality. Defaults to
+            len(map_config.regions) (single-map behavior).
 
     Returns:
         PyTorch Geometric Data object with:
@@ -67,6 +73,12 @@ def env_to_graph(
 
     n_territories = map_config.n_territories
     n_regions = len(map_config.regions)
+    if max_regions is None:
+        max_regions = n_regions
+    if max_regions < n_regions:
+        raise ValueError(
+            f"max_regions ({max_regions}) must be >= map's n_regions ({n_regions})"
+        )
 
     # Extract observation components
     ownership = obs['territory_ownership']  # Shape: (n_territories,)
@@ -96,16 +108,18 @@ def env_to_graph(
     in_degree_normalized = in_degree / n_territories  # Normalize
     node_features.append(in_degree_normalized)
 
-    # Features 4+: Region membership (multi-hot encoding)
-    # Create territory-to-region mapping
-    # Note: Territories can belong to multiple regions (e.g., 'center' overlaps with 'north'/'south')
-    # We keep raw multi-hot values so the GNN can learn that territories in multiple regions are special
-    territory_to_region = np.zeros((n_territories, n_regions), dtype=np.float32)
+    # Features 4+: Region membership (multi-hot encoding, padded to max_regions)
+    # Create territory-to-region mapping. Slots for regions beyond this map's
+    # count stay zero so the multi-map GNN sees a consistent feature dim.
+    # Territories can belong to multiple regions (e.g., 'center' overlaps
+    # with 'north'/'south'); we keep raw multi-hot values so the GNN can
+    # learn that territories in multiple regions are special.
+    territory_to_region = np.zeros((n_territories, max_regions), dtype=np.float32)
     for region_idx, (region_name, territories) in enumerate(map_config.regions.items()):
         for territory_id in territories:
             territory_to_region[territory_id, region_idx] = 1.0
 
-    for region_idx in range(n_regions):
+    for region_idx in range(max_regions):
         node_features.append(territory_to_region[:, region_idx])
 
     # Stack all node features
@@ -123,11 +137,14 @@ def env_to_graph(
 
     edge_index = np.array([edge_sources, edge_targets], dtype=np.int64)
 
-    # Create global features (graph-level)
+    # Create global features (graph-level). Pad region_control to max_regions
+    # so batched multi-map rollouts have a consistent global_features_dim.
+    region_control_padded = np.zeros(max_regions, dtype=np.float32)
+    region_control_padded[:n_regions] = region_control.astype(np.float32)
     global_features = np.concatenate([
         available_income.astype(np.float32) / 20.0,  # Normalize income (max ~20)
         turn_number.astype(np.float32) / 100.0,  # Normalize turn (max 100)
-        region_control.astype(np.float32),  # Region control indicators
+        region_control_padded,  # Region control indicators (padded)
     ])
 
     # Convert to PyTorch tensors
@@ -165,13 +182,17 @@ class GraphObservationWrapper:
     enabling the use of GNN policies.
     """
 
-    def __init__(self, env, device: Optional[torch.device] = None):
+    def __init__(self, env, device: Optional[torch.device] = None,
+                 max_regions: Optional[int] = None):
         """
         Initialize wrapper around ParallelRiskEnv.
 
         Args:
             env: ParallelRiskEnv instance
             device: Torch device (cpu/cuda)
+            max_regions: Pad region features to this width so multi-map training
+                over maps with differing region counts emits a consistent
+                feature dim. Defaults to len(env.map_config.regions) (single-map).
 
         Raises:
             ImportError: If PyTorch Geometric is not installed
@@ -184,6 +205,9 @@ class GraphObservationWrapper:
         self.env = env
         self.device = device if device is not None else torch.device('cpu')
         self.map_config = env.map_config
+        self.max_regions = (
+            max_regions if max_regions is not None else len(self.map_config.regions)
+        )
 
         # Store wrapped environment properties
         self.possible_agents = env.possible_agents
@@ -202,7 +226,8 @@ class GraphObservationWrapper:
 
         # Convert observations to graphs
         graph_obs = {
-            agent: env_to_graph(obs[agent], self.map_config, self.device)
+            agent: env_to_graph(obs[agent], self.map_config, self.device,
+                                max_regions=self.max_regions)
             for agent in obs.keys()
         }
 
@@ -226,7 +251,8 @@ class GraphObservationWrapper:
 
         # Convert observations to graphs
         graph_obs = {
-            agent: env_to_graph(obs[agent], self.map_config, self.device)
+            agent: env_to_graph(obs[agent], self.map_config, self.device,
+                                max_regions=self.max_regions)
             for agent in obs.keys()
         }
 
@@ -250,14 +276,18 @@ class GraphObservationWrapper:
         """
         n_territories = self.map_config.n_territories
         n_regions = len(self.map_config.regions)
-        feature_dim = 3 + n_regions  # troops, ownership, in_degree, + region one-hot
+        # feature dim uses self.max_regions (may exceed this map's own region
+        # count when wrapping in a multi-map training set) so the model sees
+        # the same input dim across every map.
+        feature_dim = 3 + self.max_regions  # troops, ownership, in_degree, + region one-hot
 
         return {
             'type': 'graph',
             'node_features_dim': feature_dim,
-            'global_features_dim': 2 + n_regions,
+            'global_features_dim': 2 + self.max_regions,
             'n_territories': n_territories,
             'n_regions': n_regions,
+            'max_regions': self.max_regions,
         }
 
     @property

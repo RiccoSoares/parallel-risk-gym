@@ -96,8 +96,15 @@ def _rollout_worker(args):
     objects.  The caller is responsible for re-batching before calling
     update_policy.
     """
-    (policy_state_dict, model_kwargs, env_configs, action_budget,
-     num_steps, base_seed) = args
+    # max_regions is optional for backward compatibility with older args tuples
+    # (single-map runs that don't need padding).
+    if len(args) == 7:
+        (policy_state_dict, model_kwargs, env_configs, action_budget,
+         num_steps, base_seed, max_regions) = args
+    else:
+        (policy_state_dict, model_kwargs, env_configs, action_budget,
+         num_steps, base_seed) = args
+        max_regions = None
 
     import torch
     import numpy as np
@@ -127,7 +134,9 @@ def _rollout_worker(args):
             seed=ecfg.get('seed'),
             reward_shaping_config=reward_shaping_config,
         )
-        envs.append(GraphObservationWrapper(raw_env, device=device))
+        envs.append(GraphObservationWrapper(
+            raw_env, device=device, max_regions=max_regions,
+        ))
         map_names.append(ecfg['map_name'])
 
     rollout = {
@@ -343,6 +352,14 @@ class PPOTrainer:
 
         self.map_names = map_names
 
+        # Compute the max region count across all training maps so every
+        # rollout emits observations with the same feature dim. Without this
+        # padding, wrapping a mixed-region-count multi-map set crashes the
+        # GNN input projection (dim inferred from one map, sees a different
+        # map's dim in the next rollout).
+        from parallel_risk.env.map_config import MapRegistry
+        max_regions = max(len(MapRegistry.get(m).regions) for m in map_names)
+
         # Create one wrapped environment per map
         self.envs = []
         for map_name in map_names:
@@ -352,13 +369,17 @@ class PPOTrainer:
                 seed=env_config.get('seed', None),
                 reward_shaping_config=reward_shaping_config
             )
-            self.envs.append(GraphObservationWrapper(_env, device=self.device))
+            self.envs.append(GraphObservationWrapper(
+                _env, device=self.device, max_regions=max_regions,
+            ))
 
         # Backward-compat aliases (point to the first environment)
         self.wrapped_env = self.envs[0]
         self.env = self.envs[0].env
+        self.max_regions = max_regions
 
-        # Get graph observation info from first env (same across all maps — all have 3 regions)
+        # Get graph observation info from first env (dims are now consistent
+        # across all maps thanks to the max_regions padding above).
         obs_space = self.envs[0].observation_space
         self.node_features_dim = obs_space['node_features_dim']
         self.global_features_dim = obs_space['global_features_dim']
@@ -448,7 +469,7 @@ class PPOTrainer:
         ]
         state_dict = {k: v.cpu() for k, v in self.policy.state_dict().items()}
         return (state_dict, model_kwargs, env_configs, self.action_budget,
-                steps_each, worker_seed)
+                steps_each, worker_seed, self.max_regions)
 
     def collect_rollout(self, num_steps: int):
         """

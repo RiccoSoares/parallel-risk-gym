@@ -5,7 +5,13 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
-from parallel_risk.env.map_config import MapRegistry, _check_connected, _check_bidirectional, _check_region_ids
+from parallel_risk.env.map_config import (
+    MapRegistry,
+    _check_connected,
+    _check_bidirectional,
+    _check_region_ids,
+    _check_symmetry,
+)
 from parallel_risk import ParallelRiskEnv
 
 
@@ -136,7 +142,41 @@ def test_all_maps_balanced_ownership():
 
 
 # ---------------------------------------------------------------------------
-# Test 7: Smoke test — instantiate env with each map and run 3 steps
+# Test 7a: Every map is symmetric under a player-swapping graph automorphism
+# ---------------------------------------------------------------------------
+
+def test_all_maps_symmetric():
+    print("\nTest 7a: All maps admit a player-swapping automorphism")
+    for name in MapRegistry.list_maps():
+        config = MapRegistry.get(name)
+        ok, msg = _check_symmetry(config)
+        assert ok, f"Map '{name}' is not symmetric: {msg}"
+        print(f"  {name}: symmetric ({msg})  OK")
+    print("  PASSED")
+
+
+# ---------------------------------------------------------------------------
+# Test 7b: Every region has a defined, positive bonus
+# ---------------------------------------------------------------------------
+
+def test_all_maps_region_bonuses_positive():
+    print("\nTest 7b: Every region has a defined positive bonus")
+    for name in MapRegistry.list_maps():
+        config = MapRegistry.get(name)
+        for region_name in config.regions:
+            assert region_name in config.region_bonuses, (
+                f"Map '{name}' region '{region_name}' has no bonus defined"
+            )
+            bonus = config.region_bonuses[region_name]
+            assert bonus > 0, (
+                f"Map '{name}' region '{region_name}' has non-positive bonus {bonus}"
+            )
+        print(f"  {name}: {len(config.regions)} region(s), all bonuses > 0  OK")
+    print("  PASSED")
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Smoke test — instantiate env with each map and run 3 steps
 # ---------------------------------------------------------------------------
 
 def test_all_maps_env_smoke():
@@ -171,6 +211,8 @@ def run_all_tests():
         test_all_maps_bidirectional,
         test_all_maps_region_ids,
         test_all_maps_balanced_ownership,
+        test_all_maps_symmetric,
+        test_all_maps_region_bonuses_positive,
         test_all_maps_env_smoke,
     ]
     passed = 0

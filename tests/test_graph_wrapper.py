@@ -50,9 +50,11 @@ def test_env_to_graph():
     assert torch.all(graph.edge_index >= 0), "Edge indices should be non-negative"
     assert torch.all(graph.edge_index < n_territories), f"Edge indices should be < {n_territories}"
 
-    # Verify global features
+    # Verify global features (env_to_graph shapes as [1, dim] for PyG batching)
     expected_global_dim = 2 + n_regions  # income, turn, + region control
-    assert graph.global_features.shape[0] == expected_global_dim, f"Expected {expected_global_dim} global features"
+    assert graph.global_features.shape[-1] == expected_global_dim, (
+        f"Expected {expected_global_dim} global features, got {graph.global_features.shape[-1]}"
+    )
 
     print(f"✓ All graph structure checks passed")
 
