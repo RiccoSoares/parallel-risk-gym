@@ -116,10 +116,15 @@ def _eval_worker(args):
         else:
             draws += 1
 
+    total = max(wins + losses + draws, 1)
     return map_name, {
         'wins': wins, 'losses': losses, 'draws': draws,
         'total': wins + losses + draws,
-        'win_rate': wins / max(wins + losses + draws, 1),
+        'win_rate': wins / total,
+        'draw_rate': draws / total,
+        # Head-to-head score: draws count half. Used for the dashboard and
+        # aggregate metric because several maps are draw-heavy.
+        'score': (wins + 0.5 * draws) / total,
     }
 
 
@@ -201,28 +206,37 @@ def plot_dashboard(metrics: Dict[str, list],
               labelcolor=_INK_SECONDARY, fontsize=10, loc='upper right')
     _chrome(ax)
 
-    # ---- Panel B: per-map eval win-rate + mean ------------------------
+    # ---- Panel B: per-map eval score + mean ---------------------------
+    # Score = (wins + 0.5*draws) / n. Draw-heavy maps sit at 50 rather
+    # than 0, so the mean draw-rate is drawn alongside to disambiguate
+    # "parity" from "nobody wins".
     ax = axes[1]
     if eval_history:
         eval_iters = [e['iteration'] for e in eval_history]
         # One line per map
         for m in map_names:
-            per_map = [e['per_map'].get(m, {}).get('win_rate', float('nan')) * 100
+            per_map = [e['per_map'].get(m, {}).get('score', float('nan')) * 100
                        for e in eval_history]
             ax.plot(eval_iters, per_map, color=map_color[m], lw=1.2,
                     marker='o', markersize=4, alpha=0.75, label=m)
-        # Aggregate mean
-        mean_series = [e.get('mean_win_rate', float('nan')) * 100
+        # Aggregate mean score
+        mean_series = [e.get('mean_score', float('nan')) * 100
                        for e in eval_history]
         ax.plot(eval_iters, mean_series, color=C_MEAN_EVAL, lw=2.5,
                 marker='s', markersize=8, markerfacecolor=_SURFACE,
                 markeredgewidth=2, markeredgecolor=C_MEAN_EVAL,
-                label='MEAN', zorder=5)
+                label='MEAN score', zorder=5)
+        # Aggregate mean draw-rate
+        draw_series = [e.get('mean_draw_rate', float('nan')) * 100
+                       for e in eval_history]
+        ax.plot(eval_iters, draw_series, color=C_DRAW, lw=2, linestyle=':',
+                marker='^', markersize=6, label='MEAN draw %', zorder=4)
     ax.axhline(50, color=_INK_MUTED, lw=1, linestyle='--', alpha=0.6, zorder=1)
     ax.text(min(iters) if iters else 0, 51.5, '50 %',
             color=_INK_MUTED, fontsize=9, va='bottom')
     ax.set_ylim(0, 100)
-    ax.set_ylabel('% vs MCTS(uniform)', color=_INK_SECONDARY, fontsize=11)
+    ax.set_ylabel('score (wins + 0.5·draws) / n  [%]',
+                  color=_INK_SECONDARY, fontsize=11)
     ax.set_title('Eval per map: MCTS+GNN vs MCTS(uniform) at same budget',
                  color=_INK_PRIMARY, fontsize=13, fontweight='bold', pad=6)
     ax.legend(frameon=True, facecolor=_SURFACE, edgecolor=_GRIDLINE,
@@ -253,7 +267,7 @@ def plot_dashboard(metrics: Dict[str, list],
     ax.set_title('Self-play sanity: outcome mix (aggregated) + game length',
                  color=_INK_PRIMARY, fontsize=13, fontweight='bold', pad=6)
 
-    fig.suptitle('ExIt training run — 9-map cold-start',
+    fig.suptitle(f'ExIt training run — {len(map_names)} maps',
                  color=_INK_PRIMARY, fontsize=14, fontweight='bold')
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(output_path, dpi=150, facecolor=_SURFACE)
@@ -309,7 +323,11 @@ def main():
     parser.add_argument('--output-dir',
                         default='experiments/mcts_gnn_exit_training_run')
     parser.add_argument('--map-names', type=str, default=None,
-                        help='Comma-separated list; defaults to the 9 unique maps.')
+                        help='Comma-separated list, or "all" for every registered '
+                             'map (basic_6 alias excluded); defaults to the 9 '
+                             'unique small maps.')
+    parser.add_argument('--action-budget', type=int, default=5,
+                        help='K: actions per turn for both self-play and eval.')
     parser.add_argument('--num-iterations', type=int, default=50)
     parser.add_argument('--num-games-per-iter', type=int, default=72)
     parser.add_argument('--num-workers', type=int, default=8)
@@ -342,8 +360,13 @@ def main():
                              'still trained via MSE. Eval always uses value head.')
     args = parser.parse_args()
 
-    map_names = ([m.strip() for m in args.map_names.split(',')]
-                 if args.map_names else list(DEFAULT_MAPS))
+    if args.map_names is None:
+        map_names = list(DEFAULT_MAPS)
+    elif args.map_names.strip().lower() == 'all':
+        map_names = sorted(m for m in MapRegistry.list_maps() if m != 'basic_6')
+    else:
+        map_names = [m.strip() for m in args.map_names.split(',')]
+    K = args.action_budget
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -355,8 +378,8 @@ def main():
     print("=" * 70)
     print(f"  iterations={args.num_iterations}  games/iter={args.num_games_per_iter}  "
           f"workers={args.num_workers}  epochs/iter={args.num_epochs}")
-    print(f"  mcts_budget={args.mcts_budget}  max_turns={args.max_turns}  "
-          f"eval every {args.eval_interval} iters "
+    print(f"  mcts_budget={args.mcts_budget}  action_budget K={K}  "
+          f"max_turns={args.max_turns}  eval every {args.eval_interval} iters "
           f"({args.num_eval_games} games/map, {args.eval_workers} workers)")
     print(f"  model: hidden={args.hidden_dim} layers={args.num_layers}  "
           f"trainer device={'GPU' if args.use_gpu else 'CPU'}")
@@ -366,7 +389,7 @@ def main():
 
     trainer_cfg = {
         'env': {'map_names': map_names, 'max_turns': args.max_turns,
-                'action_budget': 5},
+                'action_budget': K},
         'model': {'type': 'gcn', 'hidden_dim': args.hidden_dim,
                   'num_layers': args.num_layers, 'dropout': 0.1},
         'trainer': {
@@ -396,7 +419,7 @@ def main():
         'simulation_budget': args.mcts_budget,
         'c_puct': 1.4, 'uct_c': 1.41, 'pw_alpha': 0.5,
         'max_rollout_turns': args.max_turns,
-        'action_budget': 5,
+        'action_budget': K,
         'pw_sampler': 'masked_random',
         'use_value_fn': args.use_value_fn,
     }
@@ -466,7 +489,7 @@ def main():
                 model_kwargs=trainer.model_kwargs(),
                 map_names=map_names,
                 max_turns=args.max_turns,
-                action_budget=5,
+                action_budget=K,
                 mcts_budget=args.mcts_budget,
                 num_games_per_map=args.num_eval_games,
                 num_workers=min(args.eval_workers, len(map_names)),
@@ -475,15 +498,21 @@ def main():
             )
             eval_s = time.perf_counter() - t2
             mean_wr = float(np.mean([per_map[m]['win_rate'] for m in map_names]))
+            mean_score = float(np.mean([per_map[m]['score'] for m in map_names]))
+            mean_draw = float(np.mean([per_map[m]['draw_rate'] for m in map_names]))
             eval_history.append({
                 'iteration': it + 1,
                 'per_map': per_map,
                 'mean_win_rate': mean_wr,
+                'mean_score': mean_score,
+                'mean_draw_rate': mean_draw,
                 'eval_time_s': eval_s,
             })
-            per_map_summary = '  '.join(f"{m}={per_map[m]['win_rate']:.0%}"
-                                        for m in map_names)
-            print(f"    [eval @ iter {it+1}]  mean={mean_wr:.2%}  "
+            per_map_summary = '  '.join(
+                f"{m}={per_map[m]['score']:.0%}(d{per_map[m]['draws']})"
+                for m in map_names)
+            print(f"    [eval @ iter {it+1}]  mean_score={mean_score:.2%}  "
+                  f"mean_win={mean_wr:.2%}  mean_draw={mean_draw:.2%}  "
                   f"({per_map_summary})  eval_time={eval_s:.1f}s")
 
         if (it + 1) % args.checkpoint_interval == 0:
@@ -514,9 +543,9 @@ def main():
 
     print(f"\nTotal wall-clock: {run_s/60:.1f} min")
     if eval_history:
-        first_mean = eval_history[0]['mean_win_rate']
-        last_mean = eval_history[-1]['mean_win_rate']
-        print(f"Mean eval win-rate: first={first_mean:.2%}  last={last_mean:.2%}  "
+        first_mean = eval_history[0]['mean_score']
+        last_mean = eval_history[-1]['mean_score']
+        print(f"Mean eval score: first={first_mean:.2%}  last={last_mean:.2%}  "
               f"delta={(last_mean - first_mean):+.2%}")
 
 
