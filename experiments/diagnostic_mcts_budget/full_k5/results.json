@@ -1,0 +1,1397 @@
+{
+  "timestamp": "2026-09-09T09:25:06.325580",
+  "config": {
+    "maps": "simple_6,medium_8,large_10,triangle_6,ring_6,star_8,double_hub_8,hex_grid_10,dense_12",
+    "num_games": 20,
+    "budget_high": 200,
+    "budget_low": 40,
+    "action_budget": 5,
+    "max_turns": 40,
+    "workers": 8,
+    "base_seed": 42,
+    "output_dir": "experiments/diagnostic_mcts_budget/full_k5"
+  },
+  "aggregate_score_high": 0.7833333333333333,
+  "wall_clock_min": 12.57793109814326,
+  "per_map_summary": {
+    "simple_6": {
+      "n": 20,
+      "wins_high": 17,
+      "losses_high": 1,
+      "draws": 2,
+      "win_rate_high": 0.85,
+      "score_high": 0.9,
+      "ci_low": 0.6989617935882066,
+      "ci_high": 0.9721341060158468,
+      "avg_turns": 22.8
+    },
+    "medium_8": {
+      "n": 20,
+      "wins_high": 0,
+      "losses_high": 0,
+      "draws": 20,
+      "win_rate_high": 0.0,
+      "score_high": 0.5,
+      "ci_low": 0.2992949144298199,
+      "ci_high": 0.7007050855701801,
+      "avg_turns": 40.0
+    },
+    "large_10": {
+      "n": 20,
+      "wins_high": 12,
+      "losses_high": 2,
+      "draws": 6,
+      "win_rate_high": 0.6,
+      "score_high": 0.75,
+      "ci_low": 0.5312949900419365,
+      "ci_high": 0.888139947210597,
+      "avg_turns": 30.35
+    },
+    "triangle_6": {
+      "n": 20,
+      "wins_high": 16,
+      "losses_high": 4,
+      "draws": 0,
+      "win_rate_high": 0.8,
+      "score_high": 0.8,
+      "ci_low": 0.5839782779742401,
+      "ci_high": 0.9193436467288,
+      "avg_turns": 25.85
+    },
+    "ring_6": {
+      "n": 20,
+      "wins_high": 18,
+      "losses_high": 1,
+      "draws": 1,
+      "win_rate_high": 0.9,
+      "score_high": 0.925,
+      "ci_low": 0.730551627690361,
+      "ci_high": 0.9824877656389457,
+      "avg_turns": 21.75
+    },
+    "star_8": {
+      "n": 20,
+      "wins_high": 8,
+      "losses_high": 0,
+      "draws": 12,
+      "win_rate_high": 0.4,
+      "score_high": 0.7,
+      "ci_low": 0.4810232237710206,
+      "ci_high": 0.854524726031006,
+      "avg_turns": 32.9
+    },
+    "double_hub_8": {
+      "n": 20,
+      "wins_high": 18,
+      "losses_high": 1,
+      "draws": 1,
+      "win_rate_high": 0.9,
+      "score_high": 0.925,
+      "ci_low": 0.730551627690361,
+      "ci_high": 0.9824877656389457,
+      "avg_turns": 27.35
+    },
+    "hex_grid_10": {
+      "n": 20,
+      "wins_high": 15,
+      "losses_high": 2,
+      "draws": 3,
+      "win_rate_high": 0.75,
+      "score_high": 0.825,
+      "ci_low": 0.6113705158377042,
+      "ci_high": 0.933894902590589,
+      "avg_turns": 27.15
+    },
+    "dense_12": {
+      "n": 20,
+      "wins_high": 9,
+      "losses_high": 0,
+      "draws": 11,
+      "win_rate_high": 0.45,
+      "score_high": 0.725,
+      "ci_low": 0.505880494175146,
+      "ci_high": 0.871610949352134,
+      "avg_turns": 34.1
+    }
+  },
+  "raw_results": {
+    "simple_6": [
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 10,
+        "high_plays_as": "agent_0",
+        "seed": 1042
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 17,
+        "high_plays_as": "agent_0",
+        "seed": 1044
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 18,
+        "high_plays_as": "agent_1",
+        "seed": 1049
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 19,
+        "high_plays_as": "agent_1",
+        "seed": 1043
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 20,
+        "high_plays_as": "agent_0",
+        "seed": 1046
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 27,
+        "high_plays_as": "agent_1",
+        "seed": 1047
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 33,
+        "high_plays_as": "agent_0",
+        "seed": 1048
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 19,
+        "high_plays_as": "agent_1",
+        "seed": 1053
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 17,
+        "high_plays_as": "agent_0",
+        "seed": 1054
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 24,
+        "high_plays_as": "agent_1",
+        "seed": 1051
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 22,
+        "high_plays_as": "agent_0",
+        "seed": 1050
+      },
+      {
+        "map_name": "simple_6",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 1045
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 23,
+        "high_plays_as": "agent_0",
+        "seed": 1052
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 25,
+        "high_plays_as": "agent_1",
+        "seed": 1055
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 16,
+        "high_plays_as": "agent_0",
+        "seed": 1056
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 13,
+        "high_plays_as": "agent_1",
+        "seed": 1057
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 18,
+        "high_plays_as": "agent_0",
+        "seed": 1060
+      },
+      {
+        "map_name": "simple_6",
+        "result": -1,
+        "turns": 28,
+        "high_plays_as": "agent_1",
+        "seed": 1059
+      },
+      {
+        "map_name": "simple_6",
+        "result": 1,
+        "turns": 27,
+        "high_plays_as": "agent_0",
+        "seed": 1058
+      },
+      {
+        "map_name": "simple_6",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 1061
+      }
+    ],
+    "medium_8": [
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 2049
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 2042
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 2043
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 2044
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 2046
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 2048
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 2047
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 2045
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 2051
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 2053
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 2050
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 2052
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 2054
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 2055
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 2056
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 2057
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 2058
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 2059
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 2060
+      },
+      {
+        "map_name": "medium_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 2061
+      }
+    ],
+    "large_10": [
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 23,
+        "high_plays_as": "agent_0",
+        "seed": 3044
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 20,
+        "high_plays_as": "agent_1",
+        "seed": 3047
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 21,
+        "high_plays_as": "agent_0",
+        "seed": 3048
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 24,
+        "high_plays_as": "agent_1",
+        "seed": 3045
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 28,
+        "high_plays_as": "agent_1",
+        "seed": 3049
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 33,
+        "high_plays_as": "agent_0",
+        "seed": 3046
+      },
+      {
+        "map_name": "large_10",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 3043
+      },
+      {
+        "map_name": "large_10",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 3042
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 24,
+        "high_plays_as": "agent_1",
+        "seed": 3055
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 29,
+        "high_plays_as": "agent_0",
+        "seed": 3052
+      },
+      {
+        "map_name": "large_10",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 3050
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 31,
+        "high_plays_as": "agent_0",
+        "seed": 3054
+      },
+      {
+        "map_name": "large_10",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 3051
+      },
+      {
+        "map_name": "large_10",
+        "result": -1,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 3053
+      },
+      {
+        "map_name": "large_10",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 3056
+      },
+      {
+        "map_name": "large_10",
+        "result": -1,
+        "turns": 37,
+        "high_plays_as": "agent_1",
+        "seed": 3057
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 19,
+        "high_plays_as": "agent_0",
+        "seed": 3058
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 18,
+        "high_plays_as": "agent_0",
+        "seed": 3060
+      },
+      {
+        "map_name": "large_10",
+        "result": 1,
+        "turns": 20,
+        "high_plays_as": "agent_1",
+        "seed": 3061
+      },
+      {
+        "map_name": "large_10",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 3059
+      }
+    ],
+    "triangle_6": [
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 17,
+        "high_plays_as": "agent_1",
+        "seed": 4047
+      },
+      {
+        "map_name": "triangle_6",
+        "result": -1,
+        "turns": 33,
+        "high_plays_as": "agent_0",
+        "seed": 4046
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 27,
+        "high_plays_as": "agent_0",
+        "seed": 4042
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 30,
+        "high_plays_as": "agent_0",
+        "seed": 4048
+      },
+      {
+        "map_name": "triangle_6",
+        "result": -1,
+        "turns": 32,
+        "high_plays_as": "agent_1",
+        "seed": 4045
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 22,
+        "high_plays_as": "agent_0",
+        "seed": 4044
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 29,
+        "high_plays_as": "agent_1",
+        "seed": 4043
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 26,
+        "high_plays_as": "agent_1",
+        "seed": 4049
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 16,
+        "high_plays_as": "agent_0",
+        "seed": 4054
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 11,
+        "high_plays_as": "agent_1",
+        "seed": 4057
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 23,
+        "high_plays_as": "agent_0",
+        "seed": 4050
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 22,
+        "high_plays_as": "agent_1",
+        "seed": 4055
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 26,
+        "high_plays_as": "agent_1",
+        "seed": 4051
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 26,
+        "high_plays_as": "agent_0",
+        "seed": 4052
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 26,
+        "high_plays_as": "agent_1",
+        "seed": 4053
+      },
+      {
+        "map_name": "triangle_6",
+        "result": -1,
+        "turns": 34,
+        "high_plays_as": "agent_0",
+        "seed": 4056
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 31,
+        "high_plays_as": "agent_1",
+        "seed": 4059
+      },
+      {
+        "map_name": "triangle_6",
+        "result": -1,
+        "turns": 19,
+        "high_plays_as": "agent_0",
+        "seed": 4060
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 31,
+        "high_plays_as": "agent_0",
+        "seed": 4058
+      },
+      {
+        "map_name": "triangle_6",
+        "result": 1,
+        "turns": 36,
+        "high_plays_as": "agent_1",
+        "seed": 4061
+      }
+    ],
+    "ring_6": [
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 8,
+        "high_plays_as": "agent_1",
+        "seed": 5045
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 9,
+        "high_plays_as": "agent_1",
+        "seed": 5047
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 13,
+        "high_plays_as": "agent_1",
+        "seed": 5049
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 10,
+        "high_plays_as": "agent_0",
+        "seed": 5050
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 20,
+        "high_plays_as": "agent_1",
+        "seed": 5043
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 20,
+        "high_plays_as": "agent_0",
+        "seed": 5048
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 21,
+        "high_plays_as": "agent_0",
+        "seed": 5046
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 12,
+        "high_plays_as": "agent_1",
+        "seed": 5055
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 27,
+        "high_plays_as": "agent_0",
+        "seed": 5044
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 35,
+        "high_plays_as": "agent_0",
+        "seed": 5042
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 20,
+        "high_plays_as": "agent_1",
+        "seed": 5053
+      },
+      {
+        "map_name": "ring_6",
+        "result": -1,
+        "turns": 26,
+        "high_plays_as": "agent_1",
+        "seed": 5051
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 21,
+        "high_plays_as": "agent_0",
+        "seed": 5056
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 34,
+        "high_plays_as": "agent_0",
+        "seed": 5052
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 7,
+        "high_plays_as": "agent_1",
+        "seed": 5061
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 30,
+        "high_plays_as": "agent_0",
+        "seed": 5058
+      },
+      {
+        "map_name": "ring_6",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 5054
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 21,
+        "high_plays_as": "agent_1",
+        "seed": 5057
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 28,
+        "high_plays_as": "agent_0",
+        "seed": 5060
+      },
+      {
+        "map_name": "ring_6",
+        "result": 1,
+        "turns": 33,
+        "high_plays_as": "agent_1",
+        "seed": 5059
+      }
+    ],
+    "star_8": [
+      {
+        "map_name": "star_8",
+        "result": 1,
+        "turns": 10,
+        "high_plays_as": "agent_0",
+        "seed": 6048
+      },
+      {
+        "map_name": "star_8",
+        "result": 1,
+        "turns": 15,
+        "high_plays_as": "agent_0",
+        "seed": 6044
+      },
+      {
+        "map_name": "star_8",
+        "result": 1,
+        "turns": 21,
+        "high_plays_as": "agent_0",
+        "seed": 6042
+      },
+      {
+        "map_name": "star_8",
+        "result": 1,
+        "turns": 27,
+        "high_plays_as": "agent_1",
+        "seed": 6043
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 6047
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 6046
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 6049
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 6045
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 6050
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 6051
+      },
+      {
+        "map_name": "star_8",
+        "result": 1,
+        "turns": 21,
+        "high_plays_as": "agent_0",
+        "seed": 6052
+      },
+      {
+        "map_name": "star_8",
+        "result": 1,
+        "turns": 21,
+        "high_plays_as": "agent_0",
+        "seed": 6056
+      },
+      {
+        "map_name": "star_8",
+        "result": 1,
+        "turns": 28,
+        "high_plays_as": "agent_1",
+        "seed": 6055
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 6053
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 6054
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 6057
+      },
+      {
+        "map_name": "star_8",
+        "result": 1,
+        "turns": 35,
+        "high_plays_as": "agent_0",
+        "seed": 6058
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 6059
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 6060
+      },
+      {
+        "map_name": "star_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 6061
+      }
+    ],
+    "double_hub_8": [
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 11,
+        "high_plays_as": "agent_0",
+        "seed": 7048
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 21,
+        "high_plays_as": "agent_0",
+        "seed": 7044
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 30,
+        "high_plays_as": "agent_1",
+        "seed": 7043
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 27,
+        "high_plays_as": "agent_1",
+        "seed": 7047
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 29,
+        "high_plays_as": "agent_0",
+        "seed": 7046
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 23,
+        "high_plays_as": "agent_1",
+        "seed": 7045
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 7049
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 37,
+        "high_plays_as": "agent_0",
+        "seed": 7042
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 21,
+        "high_plays_as": "agent_0",
+        "seed": 7050
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 14,
+        "high_plays_as": "agent_0",
+        "seed": 7054
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 23,
+        "high_plays_as": "agent_1",
+        "seed": 7051
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 22,
+        "high_plays_as": "agent_1",
+        "seed": 7053
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 7052
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 19,
+        "high_plays_as": "agent_0",
+        "seed": 7056
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 22,
+        "high_plays_as": "agent_1",
+        "seed": 7057
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 37,
+        "high_plays_as": "agent_1",
+        "seed": 7055
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 29,
+        "high_plays_as": "agent_0",
+        "seed": 7060
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 32,
+        "high_plays_as": "agent_0",
+        "seed": 7058
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": 1,
+        "turns": 37,
+        "high_plays_as": "agent_1",
+        "seed": 7059
+      },
+      {
+        "map_name": "double_hub_8",
+        "result": -1,
+        "turns": 33,
+        "high_plays_as": "agent_1",
+        "seed": 7061
+      }
+    ],
+    "hex_grid_10": [
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 19,
+        "high_plays_as": "agent_0",
+        "seed": 8042
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 18,
+        "high_plays_as": "agent_0",
+        "seed": 8048
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 17,
+        "high_plays_as": "agent_1",
+        "seed": 8049
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 20,
+        "high_plays_as": "agent_1",
+        "seed": 8045
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 23,
+        "high_plays_as": "agent_1",
+        "seed": 8043
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 27,
+        "high_plays_as": "agent_1",
+        "seed": 8047
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 25,
+        "high_plays_as": "agent_0",
+        "seed": 8044
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 35,
+        "high_plays_as": "agent_0",
+        "seed": 8046
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 17,
+        "high_plays_as": "agent_1",
+        "seed": 8053
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 25,
+        "high_plays_as": "agent_1",
+        "seed": 8055
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 23,
+        "high_plays_as": "agent_0",
+        "seed": 8056
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 26,
+        "high_plays_as": "agent_0",
+        "seed": 8052
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": -1,
+        "turns": 31,
+        "high_plays_as": "agent_0",
+        "seed": 8050
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 8051
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": -1,
+        "turns": 31,
+        "high_plays_as": "agent_0",
+        "seed": 8054
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 34,
+        "high_plays_as": "agent_0",
+        "seed": 8058
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 29,
+        "high_plays_as": "agent_1",
+        "seed": 8057
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 1,
+        "turns": 23,
+        "high_plays_as": "agent_1",
+        "seed": 8059
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 8060
+      },
+      {
+        "map_name": "hex_grid_10",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 8061
+      }
+    ],
+    "dense_12": [
+      {
+        "map_name": "dense_12",
+        "result": 1,
+        "turns": 20,
+        "high_plays_as": "agent_1",
+        "seed": 9045
+      },
+      {
+        "map_name": "dense_12",
+        "result": 1,
+        "turns": 25,
+        "high_plays_as": "agent_1",
+        "seed": 9043
+      },
+      {
+        "map_name": "dense_12",
+        "result": 1,
+        "turns": 23,
+        "high_plays_as": "agent_0",
+        "seed": 9046
+      },
+      {
+        "map_name": "dense_12",
+        "result": 1,
+        "turns": 28,
+        "high_plays_as": "agent_0",
+        "seed": 9044
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 9042
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 9048
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 9049
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 9047
+      },
+      {
+        "map_name": "dense_12",
+        "result": 1,
+        "turns": 27,
+        "high_plays_as": "agent_1",
+        "seed": 9051
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 9050
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 9052
+      },
+      {
+        "map_name": "dense_12",
+        "result": 1,
+        "turns": 34,
+        "high_plays_as": "agent_1",
+        "seed": 9053
+      },
+      {
+        "map_name": "dense_12",
+        "result": 1,
+        "turns": 29,
+        "high_plays_as": "agent_0",
+        "seed": 9056
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 9054
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 9057
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_1",
+        "seed": 9055
+      },
+      {
+        "map_name": "dense_12",
+        "result": 1,
+        "turns": 22,
+        "high_plays_as": "agent_1",
+        "seed": 9059
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 9058
+      },
+      {
+        "map_name": "dense_12",
+        "result": 0,
+        "turns": 40,
+        "high_plays_as": "agent_0",
+        "seed": 9060
+      },
+      {
+        "map_name": "dense_12",
+        "result": 1,
+        "turns": 34,
+        "high_plays_as": "agent_1",
+        "seed": 9061
+      }
+    ]
+  }
+}
