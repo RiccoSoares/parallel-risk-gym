@@ -252,6 +252,7 @@ Once the technique matrix is filled out (Phase 4 lands), the testbed becomes a s
 - Edge features (currently just adjacency): encode combat-strength differentials, income proximity, etc.
 - Deeper networks (currently 3 layers) — measure whether Parallel Risk actually needs long-range message passing
 - Explicit hyperparameter sweep infrastructure (Optuna? or just a simple grid script)
+- See [ARCHITECTURAL_IMPROVEMENTS.md](ARCHITECTURAL_IMPROVEMENTS.md) for a prioritized menu of architecture upgrades distilled from comparing our net against Bauer's GG-net (Tier 1: MCTS budget bump + TransformerConv + attention pooling; Tier 2: region-hierarchical modeling + intra-turn conditioning; Tier 3: full joint scoring or engine changes)
 
 ### Maps (`parallel_risk/env/map_config.py`)
 - Colleague is expanding beyond the current 9 unique maps — good
