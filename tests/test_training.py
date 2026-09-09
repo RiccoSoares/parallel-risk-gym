@@ -150,8 +150,9 @@ def test_gae_computation():
     rewards = [torch.randn(B) for _ in range(T)]
     values = [torch.randn(B) for _ in range(T)]
     dones = [torch.zeros(B) for _ in range(T)]
+    next_values = [torch.randn(B) for _ in range(T)]
 
-    advantages, returns = trainer.compute_gae(rewards, values, dones)
+    advantages, returns = trainer.compute_gae(rewards, values, dones, next_values)
 
     print(f"✓ GAE computed")
     print(f"  Advantages shape: {advantages.shape}")
