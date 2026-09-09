@@ -153,10 +153,11 @@ def make_dashboard(all_results: List[Dict[str, Any]], map_names: List[str],
        of map size — the point of the whole sweep.
     D. Peak mean win-rate vs K + wall-clock cost on secondary axis.
     """
-    cmap = plt.get_cmap('viridis')
+    # Categorical palette (tab10) — distinctive & print-friendly across K values.
+    # Order: K=5 blue, K=10 orange, K=15 green, K=20 red, then teal/purple.
+    tab = plt.get_cmap('tab10')
     K_values = sorted(r['K'] for r in all_results)
-    k_color = {K: cmap(i / max(len(K_values) - 1, 1))
-               for i, K in enumerate(K_values)}
+    k_color = {K: tab(i) for i, K in enumerate(K_values)}
     sizes = _map_sizes(map_names)
     # Sort maps by size (then by name for stable ties)
     sorted_maps = sorted(map_names, key=lambda m: (sizes[m], m))
@@ -282,13 +283,15 @@ def make_dashboard(all_results: List[Dict[str, Any]], map_names: List[str],
         mean_curve = matrix.mean(axis=0)
         peaks.append(np.max(mean_curve) * 100)
         walls.append(r['wall_clock_s'] / 60.0)
-    ax.plot(K_values, peaks, color=cmap(0.7), lw=2.5, marker='o', markersize=11,
+    # Use a neutral accent color for the peak line (not one of the K colors)
+    _accent = tab(4)  # tab10 index 4 = purple, distinct from K=5..K=20 palette
+    ax.plot(K_values, peaks, color=_accent, lw=2.5, marker='o', markersize=11,
             markerfacecolor=_SURFACE, markeredgewidth=2.5,
-            markeredgecolor=cmap(0.7), label='peak mean win-rate', zorder=3)
+            markeredgecolor=_accent, label='peak mean win-rate', zorder=3)
     for K, p in zip(K_values, peaks):
         if not np.isnan(p):
             ax.text(K, p + 3, f'{p:.1f}%', ha='center', va='bottom',
-                    color=cmap(0.7), fontsize=10, fontweight='bold')
+                    color=_accent, fontsize=10, fontweight='bold')
     ax.axhline(50, color=_INK_MUTED, lw=1, linestyle='--', alpha=0.6, zorder=1)
     ax.set_ylim(0, 105)
     ax.set_xlabel('action_budget (K)', color=_INK_SECONDARY, fontsize=11)
@@ -309,7 +312,7 @@ def make_dashboard(all_results: List[Dict[str, Any]], map_names: List[str],
             ax2.text(K + 0.4, w + 5, f'{w:.0f}m',
                      ha='center', va='bottom', color=_INK_MUTED, fontsize=8)
 
-    fig.suptitle('PPO+GNN action-budget sweep — Phase 3.5 (21 maps, sorted by size)',
+    fig.suptitle('PPO+GNN action-budget sweep — 21 maps, sorted by size',
                  color=_INK_PRIMARY, fontsize=15, fontweight='bold')
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     fig.savefig(output_path, dpi=200, facecolor=_SURFACE)
@@ -320,9 +323,8 @@ def make_per_map_trajectories(all_results: List[Dict[str, Any]],
                               map_names: List[str], output_path: Path):
     """Grid of per-map learning curves, one subplot per map."""
     K_values = sorted(r['K'] for r in all_results)
-    cmap = plt.get_cmap('viridis')
-    k_color = {K: cmap(i / max(len(K_values) - 1, 1))
-               for i, K in enumerate(K_values)}
+    tab = plt.get_cmap('tab10')
+    k_color = {K: tab(i) for i, K in enumerate(K_values)}
     sizes = _map_sizes(map_names)
     sorted_maps = sorted(map_names, key=lambda m: (sizes[m], m))
 

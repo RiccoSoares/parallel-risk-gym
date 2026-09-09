@@ -348,13 +348,15 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
 
     log_every = max(1, num_iterations // 10)
 
-    # Persistent eval executor. One worker per map so all evals run in
-    # parallel. Created lazily on first eval to avoid spawn cost when there
-    # are zero eval intervals.
+    # Persistent eval executor. Capped at 8 workers so a large map roster
+    # doesn't over-subscribe CPU (with 21 maps + 8 rollout workers alive,
+    # spawning 21 eval workers led to a hang observed in the 200-iter
+    # K-sweep). Multiple maps per worker just serialize — total wall-clock
+    # scales with map_count / min(map_count, 8).
     eval_executor = None
     if parallel_eval and len(map_names_to_train) > 1:
         eval_executor = ProcessPoolExecutor(
-            max_workers=len(map_names_to_train),
+            max_workers=min(len(map_names_to_train), 8),
             mp_context=mp.get_context('spawn'),
         )
 
