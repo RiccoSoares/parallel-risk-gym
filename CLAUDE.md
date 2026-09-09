@@ -85,7 +85,7 @@ Four reward components can be enabled independently:
 ## Project Structure
 
 - **parallel_risk/** - Main package
-  - **env/** - Environment components (core, maps, combat, validation, reward shaping)
+  - **env/** - Environment components (core, maps, combat, validation, reward shaping, map figures)
   - **training/** - Training infrastructure
     - **rllib/** - Phase 1: RLlib with MLPs (wrapper, training script, configs)
     - **torchrl/** - Phase 2: TorchRL with GNNs (graph wrapper, training script)
@@ -100,6 +100,7 @@ Four reward components can be enabled independently:
   - **self_play_league.py** - Self-play league experiment (RLlib)
 - **docs/** - Design documentation
   - DESIGN_NOTES.md - Deep dive into design decisions
+  - MAPS.md - Map atlas: rendered figure per map + how to regenerate (`docs/maps/`)
   - COMBAT_SYSTEM.md - Complete combat mechanics
   - REWARD_SHAPING.md - RL reward shaping guide
   - RLLIB_INTEGRATION.md - RLlib training guide
@@ -300,6 +301,18 @@ MapRegistry.register("my_map", create_my_map)
 
 Add a smoke-test entry in `tests/test_maps.py` to cover it.
 
+Then regenerate the map figures (see `docs/MAPS.md`):
+
+```bash
+PYTHONPATH=. python parallel_risk/env/map_viz.py --check-layouts   # flags misleading overlaps
+PYTHONPATH=. python parallel_risk/env/map_viz.py                   # writes docs/maps/
+```
+
+A new map falls back to an automatic layout. If `--check-layouts` reports a node
+drawn on top of an edge it isn't an endpoint of, add an explicit layout to
+`_LAYOUTS` in `map_viz.py` rather than shipping a figure that implies an
+adjacency the map doesn't have.
+
 Then use: `env = ParallelRiskEnv(map_name="my_map")`
 
 ### Modifying Combat Rules
@@ -354,6 +367,7 @@ print(infos['agent_0']['reward_components'])
 ## Documentation
 
 - **docs/DESIGN_NOTES.md** - Deep dive into design decisions, alternative approaches considered, 10+ extension possibilities with code examples
+- **docs/MAPS.md** - Map atlas: a rendered figure per map showing topology, initial ownership, front line and bonus regions; how to regenerate them
 - **docs/COMBAT_SYSTEM.md** - Complete combat mechanics with mathematical analysis
 - **docs/REWARD_SHAPING.md** - RL reward shaping guide with component details, tuning guidelines, and validation checklist
 - **docs/RLLIB_INTEGRATION.md** - Phase 1: Complete guide to training with RLlib (installation, configuration, troubleshooting)
