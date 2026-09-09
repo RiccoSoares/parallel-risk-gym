@@ -147,7 +147,8 @@ def evaluate_policy_vs_mcts(policy, action_decoder, map_name, action_budget,
 
     device = torch.device('cpu')
     env = ParallelRiskEnv(map_name=map_name, max_turns=50, seed=None,
-                          reward_shaping_config=None)
+                          reward_shaping_config=None,
+                          max_actions_per_turn=max(10, action_budget))
     # Create MCTS once — it is map-specific (holds map_config internally)
     mcts_agent = MCTSAgent.from_env(env, simulation_budget=mcts_budget,
                                     action_budget=action_budget)
@@ -182,11 +183,15 @@ def evaluate_policy_vs_mcts(policy, action_decoder, map_name, action_budget,
                         observations=[graph],
                     )
                 action_array = actions_tensor[0].cpu().numpy()
+                # Env-side padding target: default max(10, action_budget)
+                # matches the env's default max_actions_per_turn while scaling
+                # up for K > 10.
+                env_max_actions = max(10, action_budget)
                 actions['agent_0'] = {
                     'num_actions': action_budget,
                     'actions': np.vstack([
                         action_array,
-                        np.zeros((10 - action_budget, 3)),
+                        np.zeros((env_max_actions - action_budget, 3)),
                     ]),
                 }
 

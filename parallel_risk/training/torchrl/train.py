@@ -133,6 +133,7 @@ def _rollout_worker(args):
             max_turns=ecfg.get('max_turns', 50),
             seed=ecfg.get('seed'),
             reward_shaping_config=reward_shaping_config,
+            max_actions_per_turn=max(10, action_budget),
         )
         envs.append(GraphObservationWrapper(
             raw_env, device=device, max_regions=max_regions,
@@ -184,13 +185,16 @@ def _rollout_worker(args):
             deterministic=False, return_log_probs=True, observations=graphs,
         )
 
+        # Env-side padding target: default max(10, action_budget) matches
+        # the env's default max_actions_per_turn while scaling up for K > 10.
+        env_max_actions = max(10, action_budget)
         actions_dict = {}
         for i, agent in enumerate(sorted(obs.keys())):
             action_array = actions_tensor[i].cpu().numpy()
             actions_dict[agent] = {
                 'num_actions': action_budget,
                 'actions': np.vstack([action_array,
-                                      np.zeros((10 - action_budget, 3))]),
+                                      np.zeros((env_max_actions - action_budget, 3))]),
             }
 
         next_obs, rewards, terminateds, truncateds, _ = current_env.step(actions_dict)
@@ -360,6 +364,11 @@ class PPOTrainer:
         from parallel_risk.env.map_config import MapRegistry
         max_regions = max(len(MapRegistry.get(m).regions) for m in map_names)
 
+        # Env-side action padding must accommodate action_budget > 10.
+        # Same computation as later self.action_budget line — hoisted here
+        # because env construction happens before self.action_budget is set.
+        _env_max_actions = max(10, int(env_config.get('action_budget', 5)))
+
         # Create one wrapped environment per map
         self.envs = []
         for map_name in map_names:
@@ -367,7 +376,8 @@ class PPOTrainer:
                 map_name=map_name,
                 max_turns=env_config.get('max_turns', 100),
                 seed=env_config.get('seed', None),
-                reward_shaping_config=reward_shaping_config
+                reward_shaping_config=reward_shaping_config,
+                max_actions_per_turn=_env_max_actions,
             )
             self.envs.append(GraphObservationWrapper(
                 _env, device=self.device, max_regions=max_regions,
@@ -607,13 +617,14 @@ class PPOTrainer:
             )
 
             # Convert actions to environment format
+            env_max_actions = max(10, self.action_budget)
             actions_dict = {}
             for i, agent in enumerate(sorted(obs.keys())):
                 # Convert from tensor to numpy and then to tuple format expected by env
                 action_array = actions_tensor[i].cpu().numpy()  # [action_budget, 3]
                 actions_dict[agent] = {
                     'num_actions': self.action_budget,
-                    'actions': np.vstack([action_array, np.zeros((10 - self.action_budget, 3))])  # Pad to 10
+                    'actions': np.vstack([action_array, np.zeros((env_max_actions - self.action_budget, 3))])
                 }
 
             # Step environment
