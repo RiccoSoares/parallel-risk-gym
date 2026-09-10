@@ -298,6 +298,13 @@ def main():
     parser.add_argument('--num-iterations', type=int, default=50)
     parser.add_argument('--num-games-per-iter', type=int, default=72)
     parser.add_argument('--num-workers', type=int, default=8)
+    parser.add_argument('--games-per-worker', type=int, default=16,
+                        help='Games a worker advances in lockstep, sharing one batched '
+                             'GNN forward per round. 1 = the old one-game-at-a-time worker.')
+    parser.add_argument('--selfplay-device', default='cpu',
+                        help="Where the batched self-play forwards run. Keep 'cpu': our "
+                             'graphs are tiny and 12 CUDA contexts serialize on one device '
+                             '(measured 4x slower). See configs/mcts_gnn_exit.yaml.')
     parser.add_argument('--num-epochs', type=int, default=4)
     parser.add_argument('--mcts-budget', type=int, default=40)
     parser.add_argument('--max-turns', type=int, default=40)
@@ -415,6 +422,8 @@ def main():
             num_workers=args.num_workers,
             base_seed=it * 10000,
             max_regions=trainer.max_regions,
+            games_per_worker=args.games_per_worker,
+            device=args.selfplay_device,
         )
         collect_s = time.perf_counter() - t0
 
