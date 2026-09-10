@@ -594,12 +594,16 @@ class PPOTrainer:
             with self.timers.section('update.forward_per_epoch'):
                 action_logits, new_values, _ = self.policy(mega_batch)
 
+            # batched_obs=mega_batch: the decoder derives its masks from the
+            # batch already built above instead of re-collating all_graphs
+            # (which it did twice per epoch). Same tensors, same numbers.
             with self.timers.section('update.log_probs'):
                 new_log_probs = self.action_decoder.compute_log_probs(
                     action_logits,
                     all_actions_flat,
                     mega_batch.batch,
                     observations=all_graphs,
+                    batched_obs=mega_batch,
                 ).sum(dim=1).view(T, B)  # [T, B]
 
             with self.timers.section('update.entropy'):
@@ -607,6 +611,7 @@ class PPOTrainer:
                     action_logits,
                     mega_batch.batch,
                     observations=all_graphs,
+                    batched_obs=mega_batch,
                 ).mean(dim=1).view(T, B)  # [T, B]
 
             new_values_2d = new_values.squeeze(-1).view(T, B)  # [T, B]

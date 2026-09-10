@@ -40,8 +40,30 @@ from typing import Dict, List
 import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
-CKPT_K10 = REPO / 'experiments' / 'k_sweep_ppo_200' / 'K10' / 'checkpoints' / 'final.pt'
+CKPT_REL = Path('experiments') / 'k_sweep_ppo_200' / 'K10' / 'checkpoints' / 'final.pt'
 CKPT_MAX_REGIONS = 5   # 21-map roster -> node_features_dim = 3 + 5
+
+
+def resolve_k10_checkpoint(explicit: str = None) -> Path:
+    """Find the K10 PPO checkpoint (gitignored, so absent from fresh worktrees).
+
+    Order: explicit argument, $PRG_K10_CKPT, this checkout, then the main
+    checkout when this file lives in an agent worktree
+    (<main>/.claude/worktrees/<name>/...).
+    """
+    import os
+    candidates = [explicit, os.environ.get('PRG_K10_CKPT'), REPO / CKPT_REL]
+    if REPO.parent.name == 'worktrees' and REPO.parent.parent.name == '.claude':
+        candidates.append(REPO.parents[2] / CKPT_REL)
+    for c in candidates:
+        if c and Path(c).exists():
+            return Path(c)
+    raise FileNotFoundError(
+        f'K10 checkpoint not found; tried {[str(c) for c in candidates if c]}. '
+        'Pass --ckpt or set PRG_K10_CKPT.')
+
+
+CKPT_K10 = None  # set in main() via resolve_k10_checkpoint()
 K = 10
 MAX_TURNS = 40
 MCTS_BUDGET = 200
@@ -361,18 +383,24 @@ def main():
     p.add_argument('--full', action='store_true', help='budget 200 + larger sizes for self-play/eval')
     p.add_argument('--output-dir', default='experiments/benchmarks')
     p.add_argument('--compare', nargs=2, metavar=('BEFORE', 'AFTER'))
+    p.add_argument('--ckpt', default=None, help='K10 PPO checkpoint (default: auto-resolve)')
+    p.add_argument('--threads', type=int, default=4,
+                   help='torch threads in this process (fixed so runs are comparable)')
     args = p.parse_args()
 
     if args.compare:
         compare(*args.compare)
         return
 
-    torch.set_num_threads(max(1, min(8, torch.get_num_threads())))
+    global CKPT_K10
+    CKPT_K10 = resolve_k10_checkpoint(args.ckpt)
+    torch.set_num_threads(max(1, args.threads))
     info = git_info()
     label = args.label or info['commit']
     scenarios = [s.strip() for s in args.scenarios.split(',') if s.strip()]
     print(f'benchmark label={label} commit={info["commit"]} branch={info["branch"]} '
-          f'dirty={info["dirty"]} full={args.full} scenarios={scenarios}')
+          f'dirty={info["dirty"]} full={args.full} threads={args.threads} '
+          f'ckpt={CKPT_K10} scenarios={scenarios}')
     t0 = time.perf_counter()
     results = run(scenarios, args.full)
     out_dir = Path(args.output_dir)
@@ -380,7 +408,8 @@ def main():
     out_path = out_dir / f'{label}.json'
     with open(out_path, 'w') as f:
         json.dump({'label': label, 'timestamp': datetime.now().isoformat(), 'git': info,
-                   'full': args.full, 'platform': platform.platform(),
+                   'full': args.full, 'threads': args.threads, 'ckpt': str(CKPT_K10),
+                   'platform': platform.platform(),
                    'torch': torch.__version__, 'cuda': torch.cuda.is_available(),
                    'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
                    'results': results}, f, indent=2)

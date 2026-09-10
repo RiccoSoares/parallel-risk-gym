@@ -1,0 +1,78 @@
+{
+  "label": "baseline",
+  "timestamp": "2026-09-09T18:31:47.849486",
+  "git": {
+    "commit": "e6991e7",
+    "branch": "perf/parallel-gpu",
+    "dirty": true
+  },
+  "full": false,
+  "platform": "Windows-11-10.0.26200-SP0",
+  "torch": "2.11.0+cu128",
+  "cuda": true,
+  "gpu": "NVIDIA GeForce RTX 5080",
+  "results": {
+    "env_step": {
+      "simple_6/ms_per_step": 0.3166853333338319,
+      "grid_20/ms_per_step": 0.3176006666762987,
+      "hub_ring_30/ms_per_step": 0.3163689999928465
+    },
+    "sim_step": {
+      "simple_6/ms_per_turn": 0.2981443333313412,
+      "grid_20/ms_per_turn": 0.3061366666709849,
+      "hub_ring_30/ms_per_turn": 0.30032400000588194
+    },
+    "mcts_uniform": {
+      "simple_6/open/s_per_decision": 1.0125006000016583,
+      "simple_6/mid/s_per_decision": 0.2143407000003208,
+      "dense_12/open/s_per_decision": 2.4142764000025636,
+      "dense_12/mid/s_per_decision": 1.7853223999991314,
+      "grid_20/open/s_per_decision": 2.3823993999976665,
+      "grid_20/mid/s_per_decision": 1.7775306999974418,
+      "hub_ring_30/open/s_per_decision": 2.3541949999998906,
+      "hub_ring_30/mid/s_per_decision": 1.7961183000006713
+    },
+    "mcts_gnn_cpu": {
+      "simple_6/open/s_per_decision": 1.905569899998227,
+      "simple_6/mid/s_per_decision": 1.1808650000020862,
+      "dense_12/open/s_per_decision": 2.086022799998318,
+      "dense_12/mid/s_per_decision": 2.0866667999980564,
+      "grid_20/open/s_per_decision": 2.224956199999724,
+      "grid_20/mid/s_per_decision": 2.085277700000006,
+      "hub_ring_30/open/s_per_decision": 2.217165699999896,
+      "hub_ring_30/mid/s_per_decision": 2.2607268000028853
+    },
+    "mcts_gnn_gpu": {
+      "simple_6/open/s_per_decision": 6.410892500000045,
+      "simple_6/mid/s_per_decision": 3.514850999999908,
+      "dense_12/open/s_per_decision": 6.585464100000536,
+      "dense_12/mid/s_per_decision": 6.6289437000014,
+      "grid_20/open/s_per_decision": 6.609330100000079,
+      "grid_20/mid/s_per_decision": 6.880740600001445,
+      "hub_ring_30/open/s_per_decision": 6.327274300001591,
+      "hub_ring_30/mid/s_per_decision": 6.688593800001399
+    },
+    "ppo": {
+      "multimap_cpu_w1/rollout_s": 2.9056011000005433,
+      "multimap_cpu_w1/update_s": 0.5938563666653257,
+      "multimap_cpu_w1/iter_s": 3.499457466665869,
+      "multimap_gpu_w4/rollout_s": 2.1993366666659617,
+      "multimap_gpu_w4/update_s": 0.35168523333171225,
+      "multimap_gpu_w4/iter_s": 2.551021899997674,
+      "ksweep_cpu_w8/rollout_s": 2.2610865333335823,
+      "ksweep_cpu_w8/update_s": 2.2272413666663247,
+      "ksweep_cpu_w8/iter_s": 4.4883278999999074,
+      "ksweep_gpu_w8/rollout_s": 2.9022907000010796,
+      "ksweep_gpu_w8/update_s": 0.47403063333331374,
+      "ksweep_gpu_w8/iter_s": 3.3763213333343933
+    },
+    "exit_selfplay": {
+      "games12_w12_b40/wall_s": 28.294511799998872,
+      "games12_w12_b40/s_per_game": 2.3578759833332392,
+      "games12_w12_b40/examples": 912.0
+    },
+    "eval_event": {
+      "3maps_g2_b40/wall_s": 59.23681990000114
+    }
+  }
+}

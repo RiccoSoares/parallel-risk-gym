@@ -59,7 +59,24 @@ import numpy as np
 import torch
 
 REPO = Path(__file__).resolve().parents[1]
-DEFAULT_CKPT = REPO / "experiments/k_sweep_ppo_200/K10/checkpoints/final.pt"
+CKPT_REL = "experiments/k_sweep_ppo_200/K10/checkpoints/final.pt"
+
+
+def default_checkpoint() -> Path:
+    """The K10 checkpoint is gitignored, so an agent worktree under
+    <main>/.claude/worktrees/<name>/ does not have it; fall back to the main
+    checkout's copy, or honour $PRG_K10_CKPT."""
+    import os
+    candidates = [os.environ.get('PRG_K10_CKPT'), REPO / CKPT_REL]
+    if REPO.parent.name == 'worktrees' and REPO.parent.parent.name == '.claude':
+        candidates.append(REPO.parents[2] / CKPT_REL)
+    for c in candidates:
+        if c and Path(c).exists():
+            return Path(c)
+    return REPO / CKPT_REL   # missing; record() warns and falls back to random init
+
+
+DEFAULT_CKPT = default_checkpoint()
 CKPT_MAX_REGIONS = 5   # K10 checkpoint input_proj is 3+5 wide; ckpt config lacks 'max_regions'
 
 MAPS = ['simple_6', 'medium_8', 'large_10']
@@ -353,6 +370,12 @@ class Cmp:
 
 def compare(golden, new, rtol, atol):
     ok_all = True
+    g_ck = golden.get('_meta', {}).get('ckpt_exists')
+    n_ck = new.get('_meta', {}).get('ckpt_exists')
+    if g_ck != n_ck:
+        print(f"[FAIL] policy source differs: golden ckpt_exists={g_ck}, new ckpt_exists={n_ck}. "
+              "Sections c/e were recorded with different policies; pass --ckpt or set PRG_K10_CKPT.")
+        return False
     # Section -> list of sub-paths that must be EXACT even if they hold floats
     exact_only = {
         'a': ['a'],                            # everything in (a) is integer
@@ -397,6 +420,9 @@ def main():
 
     if args.mode == 'record':
         skip = set(s.strip() for s in args.skip.split(',') if s.strip())
+        if not Path(args.ckpt).exists():
+            print(f"WARNING: checkpoint {args.ckpt} not found; sections c/e will use a "
+                  "random-init policy and will NOT compare against the committed golden.")
         out = {'_meta': {'torch': torch.__version__, 'numpy': np.__version__,
                          'threads': args.threads, 'ckpt': args.ckpt,
                          'ckpt_exists': Path(args.ckpt).exists()}}
