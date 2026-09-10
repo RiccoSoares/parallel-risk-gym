@@ -24,7 +24,12 @@ mcts:
 
 self_play:
   num_games_per_iteration: 32
-  num_workers: 4
+  num_workers: 12           # spawn processes; each plays num_games_per_iteration // num_workers games
+  games_per_worker: 16      # games a worker keeps in flight (lockstep: one batched GNN forward per
+                            # round serves all of them); 1 = the original one-game-at-a-time CPU worker
+  device: cpu               # cpu | cuda | auto. KEEP cpu: with 12 worker processes the per-process
+                            # CUDA contexts serialize on one device and cuda measured 4x slower than
+                            # cpu on self-play (see mcts_gnn_exit.yaml for the numbers).
   dirichlet_alpha: 0.3
   noise_frac: 0.25
   temperature_turns: 10     # T=max_temperature for turns [0, temperature_turns), then argmax

@@ -214,6 +214,51 @@ and dominates on CPU at K=10 (2.5 s of 2.65 s). MCTS+GNN decisions are
 still about 400 single-graph forwards each; wave 2 batches them across
 games.
 
+### Wave 2: lockstep games, batched evaluation, and why the GPU lost
+
+`DuctMCTS` can now be stepped as a generator that yields the
+(game_state, agent_id) graphs its evaluator has not cached. `GameBatch`
+in `parallel_risk/training/mcts_gnn/lockstep.py` holds G such games,
+resumes each one (restoring and saving its private `random` and
+`np.random` state so it consumes exactly the stream it would alone),
+and serves all pending requests with one batched forward per round.
+Self-play and evaluation both use it; `run()` and the other public
+methods still drive the generators synchronously, so every existing
+caller and the golden harness are unchanged.
+
+Measured on an idle machine, 24 ExIt self-play games over the 21-map
+roster, 12 workers:
+
+| Layout | budget 40 | budget 200 |
+|---|---|---|
+| one game per worker (old) | 0.95 s/game | 3.89 s/game |
+| 16 games per worker, CPU forwards | 0.69 s/game | 2.59 s/game |
+| 16 games per worker, CUDA forwards | 2.64 s/game | 12.08 s/game |
+| 4 workers x 16 games, CUDA | 1.52 s/game | 6.90 s/game |
+
+**The GPU is the wrong device for this workload, at any batch size we
+can reach.** Batches average 23 graphs per forward. Our graphs are tiny
+(6 to 30 nodes, hidden 128, 3 layers) so such a forward costs a few
+milliseconds on one core, while a CUDA forward costs about 4.5 ms of
+fixed latency no matter the batch, and 12 worker processes' CUDA
+contexts serialize on the single device. Cutting to 4 processes reduces
+the contention but starves the tree search, which is python-bound and
+wants every core. CUDA would only pay if one process held hundreds of
+games, and then a single python thread would have to do all the
+bookkeeping. So `device: cpu` is the default in both configs, and the
+gain here comes from batching across games on the CPU, not from the GPU.
+
+Equivalence (48 seeded games on simple_6, dense_12, hub_ring_30 at
+budget 100, lockstep versus the same games played one at a time):
+trajectory-identical in 47 of 48 games on CPU and 46 of 48 on CUDA;
+outcome counts identical (chi-square p = 1.00) and game-length
+distributions identical (Kolmogorov-Smirnov p = 1.00) in both. Per
+request the batched forward differs from the single-graph forward by at
+most 7.6e-6 on a summed log-prior and 4.8e-7 on a value, which is
+occasionally enough to flip a PUCT argmax. `single_graph_forwards=True`
+turns batching off and is exact; `tests/test_lockstep.py` uses it to
+check the driver and the RNG swapping separately from float effects.
+
 ### PPO update path: decoder reads the mega-batch it already has
 
 `_update_policy_impl` builds one PyG mega-batch of all T x B graphs per

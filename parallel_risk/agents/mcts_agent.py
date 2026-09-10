@@ -306,7 +306,66 @@ class DuctMCTS:
         # `new_search()` is called at the start of `make_root`.
         self.evaluator = evaluator
 
-    def _add_sampled_action(self, node: DuctNode, agent_id: str) -> bool:
+    # ------------------------------------------------------------------
+    # Evaluation requests
+    #
+    # Every step of the search that can need a network output exists in two
+    # forms. The generator (`*_gen`) yields an evaluation request -- a list
+    # of (game_state, agent_id) pairs whose graphs the evaluator has not
+    # cached -- and continues once the caller has filled the cache. The plain
+    # method of the same name runs that generator through `drive`, which
+    # serves every request on the spot with the evaluator's single-graph
+    # forward, so it computes exactly what it always did. Existing callers
+    # use the plain methods; the lockstep driver in
+    # parallel_risk/training/mcts_gnn/lockstep.py steps the generators of
+    # many games and serves all their requests with one batched forward per
+    # round. Without an evaluator (MCTS-uniform) the generators never yield.
+    # Both forms make the same sampler calls and random draws in the same
+    # order: a request only moves a pure function of the state earlier.
+    # ------------------------------------------------------------------
+
+    def drive(self, gen):
+        """Run a search generator to completion on the synchronous path.
+
+        Each request the generator yields is served at once by
+        `self.evaluator.evaluate`, one graph at a time, so the numbers are
+        those of the unbatched search. Returns the generator's return value.
+        """
+        try:
+            request = next(gen)
+            while True:
+                if self.evaluator is None:
+                    raise RuntimeError(
+                        "the search requested a network evaluation but no evaluator is set")
+                for game_state, agent_id in request:
+                    self.evaluator.evaluate(game_state, agent_id)
+                request = gen.send(None)
+        except StopIteration as stop:
+            return stop.value
+
+    def _missing(self, game_state: dict, agent_ids) -> list:
+        """The (game_state, agent_id) pairs among `agent_ids` the evaluator has not cached."""
+        evaluator = self.evaluator
+        if evaluator is None:
+            return []
+        return [(game_state, agent_id) for agent_id in agent_ids
+                if not evaluator.has(game_state, agent_id)]
+
+    def _node_request(self, game_state: dict) -> list:
+        """Graphs a fresh non-terminal node will ask for, requested together.
+
+        Both agents' graphs when priors are needed (policy_fn set), agent_0's
+        alone when only the leaf value is (value_fn set), none otherwise. So
+        a child's value and both priors arrive in one round of a lockstep
+        driver instead of three.
+        """
+        if self.policy_fn is not None:
+            return self._missing(game_state, self.sim.AGENTS)
+        if self.value_fn is not None:
+            return self._missing(game_state, self.sim.AGENTS[:1])
+        return []
+
+    def _add_sampled_action_gen(self, node: DuctNode, agent_id: str):
         """Sample one action for `agent_id` at `node` and register it.
 
         Uses the agent's sampler to draw a candidate action, adds it to the
@@ -315,9 +374,11 @@ class DuctMCTS:
         without an extra forward pass. When policy_fn is None, prior is 0.0
         (exp(0)=1, harmless for the vanilla UCT branch which ignores 'p').
 
-        Returns True if a new action was added, False if the sampler
-        returned a duplicate. Callers rely on this signal for exhaustion
-        detection (progressive widening + `apply_root_dirichlet`).
+        Yields a request for the (state, agent) graph when the prior needs a
+        forward the evaluator has not run yet. Returns True if a new action
+        was added, False if the sampler returned a duplicate. Callers rely
+        on this signal for exhaustion detection (progressive widening +
+        `apply_root_dirichlet`).
         """
         obs = self.sim.state_to_obs(node.game_state, agent_id)
         action_dict = self.samplers[agent_id].get_action_raw(obs)
@@ -328,17 +389,19 @@ class DuctMCTS:
         if key not in node.stats[agent_id]:
             prior = 0.0
             if self.policy_fn is not None:
+                request = self._missing(node.game_state, (agent_id,))
+                if request:
+                    yield request
                 prior = self.policy_fn(node.game_state, agent_id, action_dict)
             node.stats[agent_id][key] = {'q': 0.0, 'n': 0, 'p': prior}
         return True
 
-    def make_root(self, game_state: dict) -> DuctNode:
-        """Create root node from current game state.
+    def _add_sampled_action(self, node: DuctNode, agent_id: str) -> bool:
+        """Synchronous `_add_sampled_action_gen`."""
+        return self.drive(self._add_sampled_action_gen(node, agent_id))
 
-        Every search starts here (get_action and the self-play loops call it
-        directly), so this is where the evaluator, if any, is told a new
-        search begins.
-        """
+    def make_root_gen(self, game_state: dict):
+        """Generator form of `make_root`: yields the root's graph request, returns the node."""
         if self.evaluator is not None:
             self.evaluator.new_search()
         state = RiskSimulator.clone_state(game_state)
@@ -354,20 +417,36 @@ class DuctMCTS:
             rewards, _ = self.sim._check_terminal(state)
             node.terminal_rewards = rewards
         else:
+            request = self._node_request(state)
+            if request:
+                yield request
             # Seed each player's action list with one sampled action (+ prior)
             for agent in self.sim.AGENTS:
-                self._add_sampled_action(node, agent)
+                yield from self._add_sampled_action_gen(node, agent)
         return node
 
-    def run(self, root: DuctNode, budget: int) -> None:
-        """Execute `budget` MCTS iterations from root."""
+    def make_root(self, game_state: dict) -> DuctNode:
+        """Create root node from current game state.
+
+        Every search starts here (get_action and the self-play loops call it
+        directly), so this is where the evaluator, if any, is told a new
+        search begins.
+        """
+        return self.drive(self.make_root_gen(game_state))
+
+    def search_gen(self, root: DuctNode, budget: int):
+        """Generator form of `run`: `budget` MCTS iterations from root."""
         for _ in range(budget):
-            node, path = self._select(root)
+            node, path = yield from self._select_gen(root)
             if node.is_terminal:
                 rewards = node.terminal_rewards
             else:
-                rewards = self._rollout(node.game_state)
+                rewards = yield from self._rollout_gen(node.game_state)
             self._backprop(path, node, rewards)
+
+    def run(self, root: DuctNode, budget: int) -> None:
+        """Execute `budget` MCTS iterations from root."""
+        self.drive(self.search_gen(root, budget))
 
     def best_action(self, root: DuctNode, agent_id: str) -> dict:
         """Return most-visited action for agent_id at root."""
@@ -426,6 +505,13 @@ class DuctMCTS:
         Accepts a numpy Generator `rng` for reproducibility; falls back to a
         fresh default_rng() if None.
         """
+        self.drive(self.apply_root_dirichlet_gen(root, alpha=alpha, noise_frac=noise_frac,
+                                                 min_actions=min_actions, rng=rng))
+
+    def apply_root_dirichlet_gen(self, root: DuctNode, alpha: float = 0.3,
+                                 noise_frac: float = 0.25,
+                                 min_actions: int = 8, rng=None):
+        """Generator form of `apply_root_dirichlet` (yields while widening the root)."""
         if noise_frac <= 0.0:
             return
         if rng is None:
@@ -437,7 +523,7 @@ class DuctMCTS:
             while len(root.available_actions[agent]) < min_actions:
                 if root.is_terminal:
                     break
-                added = self._add_sampled_action(root, agent)
+                added = yield from self._add_sampled_action_gen(root, agent)
                 if not added:
                     consec_dupes += 1
                     if consec_dupes >= 3:
@@ -494,9 +580,15 @@ class DuctMCTS:
         return _key_to_action(keys[idx])
 
     def _select(self, root: DuctNode) -> tuple:
+        """Synchronous `_select_gen`."""
+        return self.drive(self._select_gen(root))
+
+    def _select_gen(self, root: DuctNode):
         """Traverse tree using UCT. Returns (leaf_node, path).
 
-        path entries are (node, a0_key, a1_key).
+        path entries are (node, a0_key, a1_key). Yields the requests of
+        progressive widening and, at expansion, the child's graphs (both
+        agents together) before the child's actions are seeded.
         """
         node = root
         path = []
@@ -508,7 +600,7 @@ class DuctMCTS:
                 consec_dupes = 0
                 attempts = 0
                 while node.visit_count ** self.pw_alpha > len(node.available_actions[agent]):
-                    added = self._add_sampled_action(node, agent)
+                    added = yield from self._add_sampled_action_gen(node, agent)
                     if added:
                         consec_dupes = 0
                     else:
@@ -539,8 +631,11 @@ class DuctMCTS:
                     terminal_rewards=rewards if done else None,
                 )
                 if not done:
+                    request = self._node_request(next_state)
+                    if request:
+                        yield request
                     for agent in self.sim.AGENTS:
-                        self._add_sampled_action(child, agent)
+                        yield from self._add_sampled_action_gen(child, agent)
                 node.children[joint_key] = child
                 return child, path
 
@@ -611,12 +706,20 @@ class DuctMCTS:
         return best_key
 
     def _rollout(self, game_state: dict) -> dict:
+        """Synchronous `_rollout_gen`."""
+        return self.drive(self._rollout_gen(game_state))
+
+    def _rollout_gen(self, game_state: dict):
         """Evaluate a leaf node.
 
         If a value_fn was provided (AlphaZero mode), calls it for a direct
-        neural estimate.  Otherwise runs a random playout (standard MCTS).
+        neural estimate (yielding the leaf's graph request first when it is
+        not cached). Otherwise runs a random playout (standard MCTS).
         """
         if self.value_fn is not None:
+            request = self._missing(game_state, self.sim.AGENTS[:1])
+            if request:
+                yield request
             v = self.value_fn(game_state, 'agent_0')
             return {'agent_0': v, 'agent_1': -v}
 

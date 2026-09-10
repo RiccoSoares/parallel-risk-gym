@@ -93,14 +93,16 @@ class EvalEntry:
     Attributes:
         action_logits: list of `action_budget` dicts with 'source' [n],
             'dest' [n] and 'troops' [1, max_troops] tensors for this graph
-            only (a single-graph forward, or the slice of a paired one).
+            only (a single-graph forward, or the slice of a paired or
+            cross-game batched one).
         batched: the graph as `ActionDecoder` expects a pre-batched
             observation (`batched_obs=`): a `Data` carrying x, edge_index,
             global_features and a zero `batch` vector.
         value_tensor: the value head output for this graph, shape [1].
         value: python float of `value_tensor`, materialized on first use so
             a state whose prior is needed but whose value never is does not
-            pay a device sync.
+            pay a device sync (`evaluate_many` fills it eagerly from its one
+            host transfer).
         slot_batched, slot_logits: the same graph and logits in slot-major
             layout (K copies of the graph, copy k carrying slot k's logits),
             built by `GNNEvaluator._slot_major` on the first prior request.
@@ -140,19 +142,24 @@ class GNNEvaluator:
     (checked exactly in tests/test_mcts_gnn_agent.py) at about a third of
     the cost.
 
-    Interface (the seam a cross-game batched evaluator will implement):
+    Interface:
         new_search()                    clear the cache. `DuctMCTS.make_root`
                                         calls it, so the cache never outlives
                                         the search it was filled in.
+        has(game_state, agent_id)       -> bool, is the graph cached. The
+                                        search generators of `DuctMCTS` ask
+                                        this to decide whether to yield a
+                                        request.
         evaluate(game_state, agent_id)  -> EvalEntry, from cache or one forward.
         value_fn(game_state, agent_id)  -> float    (DuctMCTS.value_fn contract)
         policy_fn(game_state, agent_id, action_dict) -> float
                                                     (DuctMCTS.policy_fn contract)
-
-    A batched GPU version serving N concurrent games only has to fill
-    `EvalEntry` objects for many keys from one forward (an `evaluate_many`
-    over pending (game_state, agent_id) requests); `EvalEntry`'s layout and
-    the two DuctMCTS-facing methods stay as they are.
+        evaluate_many(requests, policy, device)     (static) ONE forward for
+                                        the (evaluator, game_state, agent_id)
+                                        requests of many games, possibly on
+                                        different maps, filling each
+                                        evaluator's cache. Used by the
+                                        lockstep driver only.
 
     Cache key: (ownership bytes, troops bytes, turn, that agent's available
     income, agent id). Those five things determine the observation, hence the
@@ -211,10 +218,112 @@ class GNNEvaluator:
             agent_id,
         )
 
+    def has(self, game_state: dict, agent_id: str) -> bool:
+        """True if (state, agent) is cached, i.e. value_fn/policy_fn will not forward."""
+        return self._key(game_state, agent_id) in self._cache
+
     def _graph(self, game_state: dict, agent_id: str):
         obs = self.simulator.state_to_obs(game_state, agent_id)
         return env_to_graph(obs, self.map_config, self.device,
                             max_regions=self.max_regions)
+
+    @staticmethod
+    def _collate(graphs, device):
+        """Batch graphs of any sizes into one Data on `device`.
+
+        Value-identical to `Batch.from_data_list(graphs).to(device)` for the
+        fields the policy reads (x, edge_index, global_features, batch).
+        """
+        sizes = [int(g.num_nodes) for g in graphs]
+        pieces = []
+        offset = 0
+        for g, n in zip(graphs, sizes):
+            pieces.append(g.edge_index if offset == 0 else g.edge_index + offset)
+            offset += n
+        data = Data(x=torch.cat([g.x for g in graphs]).to(device),
+                    edge_index=torch.cat(pieces, dim=1).to(device),
+                    num_nodes=offset)
+        data.global_features = torch.cat([g.global_features for g in graphs]).to(device)
+        data.batch = torch.repeat_interleave(
+            torch.arange(len(graphs), dtype=torch.long), torch.tensor(sizes)).to(device)
+        return data
+
+    @staticmethod
+    def evaluate_many(requests, policy=None, device=None) -> int:
+        """Fill many evaluators' caches from ONE batched forward.
+
+        `requests` is a list of (evaluator, game_state, agent_id) triples,
+        typically every pending request of a lockstep round. Requests that
+        are already cached are skipped and the rest are deduplicated by
+        (map, cache key), so identical positions from different games of
+        one map share a row. Graphs of different maps and sizes are collated
+        into one batch. The forward runs `policy` (default: the first
+        evaluator's) on `device` (default: where its parameters live); the
+        outputs are moved to the evaluators' own device with one transfer
+        per tensor, sliced per graph and stored as `EvalEntry` objects with
+        the layout the single-graph path produces, so value_fn/policy_fn
+        work unchanged. Values are materialized from that same transfer, so
+        value_fn never syncs later.
+
+        Numerically this is the paired forward's situation at batch size B:
+        the batched kernels reduce in a different order than a single-graph
+        forward (about 1e-5 on summed log-probs on the CPU; larger on CUDA,
+        see tests/test_lockstep.py), so the synchronous path never uses it.
+        Returns the number of graphs forwarded.
+        """
+        todo = {}    # (map identity, max_regions, cache key) -> (evaluator, state, agent)
+        fills = []   # (evaluator, cache key, todo key)
+        for evaluator, game_state, agent_id in requests:
+            key = evaluator._key(game_state, agent_id)
+            if key in evaluator._cache:
+                evaluator.n_hits += 1
+                continue
+            evaluator.n_misses += 1
+            todo_key = (id(evaluator.map_config), evaluator.max_regions, key)
+            if todo_key not in todo:
+                todo[todo_key] = (evaluator, game_state, agent_id)
+            fills.append((evaluator, key, todo_key))
+        if not todo:
+            return 0
+
+        todo_keys = list(todo)
+        owners = [todo[k] for k in todo_keys]
+        graphs = [ev._graph(state, agent_id) for ev, state, agent_id in owners]
+        if policy is None:
+            policy = owners[0][0].policy
+        if device is None:
+            device = next(policy.parameters()).device
+        device = torch.device(device) if isinstance(device, str) else device
+        with torch.no_grad():
+            action_logits, values, _ = policy(GNNEvaluator._collate(graphs, device))
+
+        # One tensor per head component, brought to the entries' device.
+        out_device = owners[0][0].device
+        source = torch.stack([d['source'] for d in action_logits])   # [K, total_nodes]
+        dest = torch.stack([d['dest'] for d in action_logits])       # [K, total_nodes]
+        troops = torch.stack([d['troops'] for d in action_logits])   # [K, B, max_troops]
+        if out_device != device:
+            source, dest, troops, values = (source.to(out_device), dest.to(out_device),
+                                            troops.to(out_device), values.to(out_device))
+        value_list = values.reshape(-1).tolist()
+
+        entries = {}
+        offset = 0
+        for i, (todo_key, (ev, _, _), graph) in enumerate(zip(todo_keys, owners, graphs)):
+            n = int(graph.num_nodes)
+            logits_i = [{'source': source[k, offset:offset + n],
+                         'dest': dest[k, offset:offset + n],
+                         'troops': troops[k, i:i + 1]} for k in range(source.size(0))]
+            entry = EvalEntry(logits_i, ev._as_batched(graph), values[i])
+            entry.value = float(value_list[i])
+            entries[todo_key] = entry
+            ev.n_graphs += 1
+            offset += n
+        for ev in {id(ev): ev for ev, _, _ in owners}.values():
+            ev.n_forwards += 1
+        for ev, key, todo_key in fills:
+            ev._cache[key] = entries[todo_key]
+        return len(graphs)
 
     @staticmethod
     def _as_batched(graph):

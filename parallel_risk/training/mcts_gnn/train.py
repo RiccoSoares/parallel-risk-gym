@@ -61,6 +61,8 @@ def run(cfg: Dict[str, Any], num_iterations: int, resume: str = None) -> None:
     self_play_cfg = cfg['self_play']
     num_games = int(self_play_cfg.get('num_games_per_iteration', 32))
     num_workers = int(self_play_cfg.get('num_workers', 4))
+    games_per_worker = int(self_play_cfg.get('games_per_worker', 1))
+    device = str(self_play_cfg.get('device', 'cpu'))
     num_epochs = int(cfg['trainer'].get('num_epochs', 4))
     ckpt_interval = int(cfg.get('outer', {}).get('checkpoint_interval', 10))
     ckpt_dir = Path(cfg.get('logging', {}).get('checkpoint_dir', 'checkpoints/mcts_gnn_training'))
@@ -68,7 +70,8 @@ def run(cfg: Dict[str, Any], num_iterations: int, resume: str = None) -> None:
 
     print(f"MCTS+GNN training | maps={cfg['env']['map_names']} | "
           f"iterations={num_iterations} | games/iter={num_games} | "
-          f"workers={num_workers} | mcts_budget={mcts_cfg['simulation_budget']}")
+          f"workers={num_workers} x {games_per_worker} games ({device}) | "
+          f"mcts_budget={mcts_cfg['simulation_budget']}")
 
     for iteration in range(start_iteration, start_iteration + num_iterations):
         iter_start = time.perf_counter()
@@ -84,6 +87,8 @@ def run(cfg: Dict[str, Any], num_iterations: int, resume: str = None) -> None:
             num_workers=num_workers,
             base_seed=iteration * 10000,
             max_regions=trainer.max_regions,
+            games_per_worker=games_per_worker,
+            device=device,
         )
         collect_time = time.perf_counter() - collect_start
 
