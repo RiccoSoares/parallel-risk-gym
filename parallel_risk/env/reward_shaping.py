@@ -186,6 +186,100 @@ class RewardShaper:
 
         return rewards
 
+    def compute_step_rewards_with_info(
+        self,
+        game_state: Dict,
+        agents: List[str],
+        agent_indices: Dict[str, int]
+    ) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
+        """compute_step_rewards() followed by get_reward_components_info(), in one pass.
+
+        Returns exactly what the two calls in sequence return, but evaluates each
+        state-only component once and counts conquests/losses from the territories
+        whose owner changed this step (usually none) instead of whole-array masks.
+        `region_completion` is stateful (one-time bonus), so as with the two-call
+        sequence the reward uses the first evaluation and the info entry is a
+        second evaluation made after the tracking update.
+
+        Returns:
+            (rewards, info): rewards maps agent -> shaped reward; info maps agent ->
+            {component_name: weighted value, 'total_shaped': sum}
+        """
+        config = self.config
+        rewards = {agent: 0.0 for agent in agents}
+        info = {agent: {} for agent in agents}
+        current_ownership = game_state['territory_ownership']
+
+        # Territories whose owner changed this step; None when begin_step() was not
+        # called (conquest/loss are then 0, as in the per-component methods)
+        changed_territories = None
+        if config.enable_territory_conquest or config.enable_territory_loss:
+            previous_ownership = getattr(self, '_pre_step_ownership', None)
+            if previous_ownership is not None:
+                changed_territories = np.flatnonzero(previous_ownership != current_ownership).tolist()
+
+        for agent in agents:
+            agent_idx = agent_indices[agent]
+            components = info[agent]
+
+            if config.enable_territory_control:
+                weighted = config.territory_control_weight * self._compute_territory_control_reward(
+                    game_state, agent_idx
+                )
+                rewards[agent] += weighted
+                components['territory_control'] = weighted
+
+            if config.enable_region_completion:
+                weighted = config.region_completion_weight * self._compute_region_completion_reward(
+                    game_state, agent, agent_idx
+                )
+                rewards[agent] += weighted
+                components['region_completion'] = self._compute_region_completion_reward(
+                    game_state, agent, agent_idx
+                ) * config.region_completion_weight
+
+            if config.enable_troop_advantage:
+                weighted = config.troop_advantage_weight * self._compute_troop_advantage_reward(
+                    game_state, agent_idx, agent_indices
+                )
+                rewards[agent] += weighted
+                components['troop_advantage'] = weighted
+
+            if config.enable_strategic_position:
+                weighted = config.strategic_position_weight * self._compute_strategic_position_reward(
+                    game_state, agent_idx
+                )
+                rewards[agent] += weighted
+                components['strategic_position'] = weighted
+
+            if config.enable_territory_conquest:
+                # Territories that were not mine and are mine now
+                newly_captured = 0
+                if changed_territories:
+                    for territory in changed_territories:
+                        if current_ownership[territory] == agent_idx:
+                            newly_captured += 1
+                weighted = config.territory_conquest_weight * float(newly_captured)
+                rewards[agent] += weighted
+                components['territory_conquest'] = weighted
+
+            if config.enable_territory_loss:
+                # Territories that were mine and are not mine now
+                territories_lost = 0
+                if changed_territories:
+                    for territory in changed_territories:
+                        if previous_ownership[territory] == agent_idx:
+                            territories_lost += 1
+                rewards[agent] -= config.territory_loss_weight * float(territories_lost)
+                components['territory_loss'] = -float(territories_lost) * config.territory_loss_weight
+
+            components['total_shaped'] = sum(components.values())
+
+        # Update previous ownership tracking for next step
+        self._previous_territory_ownership = game_state['territory_ownership'].copy()
+
+        return rewards, info
+
     def _compute_territory_control_reward(
         self,
         game_state: Dict,

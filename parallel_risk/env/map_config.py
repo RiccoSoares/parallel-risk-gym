@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import cached_property
 import numpy as np
 
 
@@ -11,6 +12,21 @@ class MapConfig:
     initial_ownership: np.ndarray
     regions: dict
     region_bonuses: dict
+
+    # Derived structures used by the per-step hot loops (env, validator,
+    # RiskSimulator). Built once per MapConfig instance on first access.
+
+    @cached_property
+    def adjacency_sets(self):
+        """Per-source sets of destinations with adjacency_matrix[source, dest] == 1."""
+        return [set(int(dest) for dest in np.flatnonzero(self.adjacency_matrix[source] == 1))
+                for source in range(self.n_territories)]
+
+    @cached_property
+    def region_items(self):
+        """[(region_name, territories_tuple, bonus)] in `regions` order."""
+        return [(name, tuple(territories), self.region_bonuses[name])
+                for name, territories in self.regions.items()]
 
 
 class MapRegistry:

@@ -57,6 +57,9 @@ class RiskSimulator:
     def __init__(self, map_config: MapConfig, max_turns: int = 100):
         self.map_config = map_config
         self.max_turns = max_turns
+        self._agent_index = {agent: idx for idx, agent in enumerate(self.AGENTS)}
+        # (name, territories, bonus) per region, in map order
+        self._region_items = map_config.region_items
 
     @staticmethod
     def clone_state(game_state: dict) -> dict:
@@ -74,22 +77,20 @@ class RiskSimulator:
         Output is compatible with MaskedRandomAgentRLlib.get_action_raw().
         Mirrors ParallelRiskEnv._get_observation() exactly.
         """
-        agent_idx = self.AGENTS.index(agent)
-        n = self.map_config.n_territories
+        agent_idx = self._agent_index[agent]
+        ownership_array = game_state['territory_ownership']
 
         # Agent-relative ownership: +1=self, -1=enemy
-        ownership = np.where(
-            game_state['territory_ownership'] == agent_idx,
-            np.int8(1),
-            np.int8(-1),
-        ).astype(np.int8)
+        ownership = np.where(ownership_array == agent_idx, np.int8(1), np.int8(-1))
 
         # Region control
-        region_names = list(self.map_config.regions.keys())
-        region_control = np.zeros(len(region_names), dtype=np.int8)
-        for i, region_name in enumerate(region_names):
-            territories = self.map_config.regions[region_name]
-            if all(game_state['territory_ownership'][t] == agent_idx for t in territories):
+        ownership_list = ownership_array.tolist()
+        region_control = np.zeros(len(self._region_items), dtype=np.int8)
+        for i, (_region_name, territories, _bonus) in enumerate(self._region_items):
+            for territory in territories:
+                if ownership_list[territory] != agent_idx:
+                    break
+            else:
                 region_control[i] = 1
 
         return {
@@ -101,17 +102,27 @@ class RiskSimulator:
             'region_control': region_control,
         }
 
+    def _income_from(self, ownership: list, agent_idx: int, base_income: int) -> int:
+        """Base income + bonuses of the regions fully owned by agent_idx (ownership: python list)."""
+        income = base_income
+        for _region_name, territories, bonus in self._region_items:
+            for territory in territories:
+                if ownership[territory] != agent_idx:
+                    break
+            else:
+                income += bonus
+        return income
+
     def _calculate_income(self, game_state: dict, agent: str) -> int:
         """Base income + region bonuses. Mirrors env._calculate_income()."""
-        agent_idx = self.AGENTS.index(agent)
-        income = game_state['income_per_turn']
-        for region_name, territories in self.map_config.regions.items():
-            if all(game_state['territory_ownership'][t] == agent_idx for t in territories):
-                income += self.map_config.region_bonuses[region_name]
-        return income
+        return self._income_from(game_state['territory_ownership'].tolist(),
+                                 self._agent_index[agent], game_state['income_per_turn'])
 
     def step(self, game_state: dict, actions: dict) -> tuple:
         """Execute one turn deterministically. Does NOT mutate input.
+
+        Mirrors ParallelRiskEnv.step() on python-list mirrors of the state
+        arrays, with actions sorted by source instead of shuffled.
 
         Args:
             game_state: Current game state dict.
@@ -120,102 +131,100 @@ class RiskSimulator:
         Returns:
             (next_state, rewards_dict, done_bool)
         """
-        state = self.clone_state(game_state)
+        ownership_array = game_state['territory_ownership']
+        troops_array = game_state['territory_troops']
+        ownership = ownership_array.tolist()
+        troops = troops_array.tolist()
+        available_income = game_state['available_income'].copy()
+        base_income = game_state['income_per_turn']
+        agent_index = self._agent_index
 
-        # Recalculate income at turn start (mirrors env.step() lines 257-258)
+        # Recalculate income at turn start (mirrors env.step())
         for agent in self.AGENTS:
-            state['available_income'][agent] = self._calculate_income(state, agent)
+            available_income[agent] = self._income_from(ownership, agent_index[agent], base_income)
 
-        # Collect and classify actions
-        validator = ActionValidator(state, self.map_config, self.AGENTS)
+        # Collect and classify actions (validator reads the live mutating mirrors —
+        # intentional, matches env behavior: later actions see earlier updates)
+        validator = ActionValidator(
+            {'territory_ownership': ownership, 'territory_troops': troops,
+             'available_income': available_income},
+            self.map_config, self.AGENTS)
         all_actions = []
         for agent in self.AGENTS:
-            if agent not in actions:
+            if agent in actions:
+                all_actions.extend(validator.parse_actions(agent, actions[agent]))
+
+        # Sort by source for determinism (replaces random.shuffle); stable, so
+        # agent_0's rows stay ahead of agent_1's within a source
+        all_actions.sort(key=lambda action: action[1])
+
+        # Execute validated actions
+        validate = validator.validate
+        for agent, source, dest, count, action_type in all_actions:
+            agent_idx = agent_index[agent]
+            if not validate(agent_idx, source, dest, count, action_type):
                 continue
-            action_dict = actions[agent]
-            num_actions = int(action_dict['num_actions'])
-            for i in range(num_actions):
-                source, dest, troops = action_dict['actions'][i]
-                source, dest, troops = int(source), int(dest), int(troops)
-                action_type = validator.classify_action(source, dest)
-                all_actions.append({
-                    'agent': agent,
-                    'source': source,
-                    'dest': dest,
-                    'troops': troops,
-                    'type': action_type,
-                })
 
-        # Sort by source for determinism (replaces random.shuffle)
-        all_actions.sort(key=lambda a: a['source'])
+            if action_type == 'deploy':
+                troops[dest] += count
+                available_income[agent] -= count
 
-        # Execute validated actions (validator reads live mutating state — intentional,
-        # matches env behavior: later actions see updated ownership from earlier ones)
-        for action_info in all_actions:
-            if validator.validate_action(action_info):
-                self._execute_action(state, action_info)
+            elif action_type == 'transfer':
+                troops[source] -= count
+                troops[dest] += count
 
-        state['turn_number'] += 1
-        rewards, done = self._check_terminal(state)
+            else:  # attack
+                troops[source] -= count
+                defending_troops = troops[dest]
+                result, surviving_troops = CombatResolver.resolve(count, defending_troops)
+
+                if result == 'attacker_wins':
+                    ownership[dest] = agent_idx
+                    troops[dest] = surviving_troops
+                else:
+                    attacker_casualties = int(defending_troops * 0.6)
+                    troops[source] += max(0, count - attacker_casualties)
+                    troops[dest] = surviving_troops
+
+        turn_number = game_state['turn_number'] + 1
+        state = {
+            'territory_ownership': np.array(ownership, dtype=ownership_array.dtype),
+            'territory_troops': np.array(troops, dtype=troops_array.dtype),
+            'turn_number': turn_number,
+            'income_per_turn': base_income,
+            'available_income': available_income,
+        }
+        rewards, done = self._terminal_from(ownership, turn_number)
         return state, rewards, done
-
-    def _execute_action(self, state: dict, action_info: dict) -> None:
-        """Execute a single validated action in place. Mirrors env._execute_action()."""
-        agent = action_info['agent']
-        agent_idx = self.AGENTS.index(agent)
-        source = action_info['source']
-        dest = action_info['dest']
-        troops = action_info['troops']
-        action_type = action_info['type']
-
-        if action_type == 'deploy':
-            state['territory_troops'][dest] += troops
-            state['available_income'][agent] -= troops
-
-        elif action_type == 'transfer':
-            state['territory_troops'][source] -= troops
-            state['territory_troops'][dest] += troops
-
-        elif action_type == 'attack':
-            state['territory_troops'][source] -= troops
-            defending_troops = state['territory_troops'][dest]
-            result, surviving_troops = CombatResolver.resolve(troops, defending_troops)
-
-            if result == 'attacker_wins':
-                state['territory_ownership'][dest] = agent_idx
-                state['territory_troops'][dest] = surviving_troops
-            else:
-                attacker_casualties = int(defending_troops * 0.6)
-                attackers_surviving = max(0, troops - attacker_casualties)
-                state['territory_troops'][source] += attackers_surviving
-                state['territory_troops'][dest] = surviving_troops
 
     def _check_terminal(self, state: dict) -> tuple:
         """Returns (rewards_dict, done_bool). Mirrors env._check_termination()."""
-        no_rewards = {a: 0.0 for a in self.AGENTS}
+        return self._terminal_from(state['territory_ownership'].tolist(), state['turn_number'])
 
-        territory_counts = {
-            a: int(np.sum(state['territory_ownership'] == i))
-            for i, a in enumerate(self.AGENTS)
-        }
+    def _terminal_from(self, ownership: list, turn_number: int) -> tuple:
+        """_check_terminal on a python-list view of territory ownership."""
+        agents = self.AGENTS
+        no_rewards = {a: 0.0 for a in agents}
+
+        territory_counts = {a: ownership.count(i) for i, a in enumerate(agents)}
 
         # Victory: one agent owns all territories
         for agent, count in territory_counts.items():
             if count == self.map_config.n_territories:
-                rewards = {a: (1.0 if a == agent else -1.0) for a in self.AGENTS}
+                rewards = {a: (1.0 if a == agent else -1.0) for a in agents}
                 return rewards, True
 
         # Elimination: one agent has 0 territories
         eliminated = [a for a, c in territory_counts.items() if c == 0]
         if eliminated:
-            remaining = [a for a in self.AGENTS if a not in eliminated]
+            remaining = [a for a in agents if a not in eliminated]
             if len(remaining) == 1:
                 winner = remaining[0]
-                rewards = {a: (1.0 if a == winner else -1.0) for a in self.AGENTS}
+                rewards = {a: (1.0 if a == winner else -1.0) for a in agents}
                 return rewards, True
 
         # Turn limit
-        if state['turn_number'] >= self.max_turns:
+        if turn_number >= self.max_turns:
             return no_rewards, True
 
         return no_rewards, False
