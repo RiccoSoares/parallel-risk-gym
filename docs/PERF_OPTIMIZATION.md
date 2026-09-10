@@ -226,15 +226,29 @@ Self-play and evaluation both use it; `run()` and the other public
 methods still drive the generators synchronously, so every existing
 caller and the golden harness are unchanged.
 
-Measured on an idle machine, 24 ExIt self-play games over the 21-map
-roster, 12 workers:
+Measured on an idle machine, ExIt self-play over the 21-map roster, 12
+workers:
 
-| Layout | budget 40 | budget 200 |
+| Layout | 24 games, budget 40 | 24 games, budget 200 |
 |---|---|---|
 | one game per worker (old) | 0.95 s/game | 3.89 s/game |
-| 16 games per worker, CPU forwards | 0.69 s/game | 2.59 s/game |
-| 16 games per worker, CUDA forwards | 2.64 s/game | 12.08 s/game |
-| 4 workers x 16 games, CUDA | 1.52 s/game | 6.90 s/game |
+| lockstep, CPU forwards | 0.69 s/game | 2.59 s/game |
+| lockstep, CUDA forwards | 2.64 s/game | 12.08 s/game |
+| 4 workers, CUDA | 1.52 s/game | 6.90 s/game |
+
+The gain grows with the number of games a worker holds, because that is
+the batch size:
+
+| Games per worker | old | lockstep | speedup |
+|---|---|---|---|
+| 2 (24 games / 12 workers) | 0.94 s/game | 0.70 s/game | 1.34x |
+| 8 (96 games / 12 workers) | 0.81 s/game | 0.49 s/game | 1.65x |
+
+A real ExIt iteration runs 72 to 96 games over 12 workers, so 6 to 8 per
+worker. Evaluation batches too: 21 maps x 2 games at budget 100 went
+from 113.2 s to 86.3 s (1.31x) with per-map scores identical on all 21
+maps. Against the original pre-optimization code an eval event is now
+3.1x faster and self-play 2.3x.
 
 **The GPU is the wrong device for this workload, at any batch size we
 can reach.** Batches average 23 graphs per forward. Our graphs are tiny

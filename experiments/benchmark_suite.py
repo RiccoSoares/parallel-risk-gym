@@ -297,11 +297,14 @@ def bench_exit_selfplay(num_games: int, num_workers: int, budget: int) -> Dict[s
     self_play_config = {'dirichlet_alpha': 0.3, 'noise_frac': 0.25,
                         'dirichlet_min_actions': 8, 'temperature_turns': 10,
                         'max_temperature': 1.0}
+    # games_per_worker/device mirror parallel_risk/training/mcts_gnn/configs/
+    # mcts_gnn_exit.yaml, so this measures what a real ExIt run does.
     t0 = time.perf_counter()
     examples = collect_games_exit(policy=policy, model_kwargs=kwargs, env_configs=env_configs,
                                   mcts_config=mcts_config, self_play_config=self_play_config,
                                   num_games=num_games, num_workers=num_workers,
-                                  base_seed=0, max_regions=CKPT_MAX_REGIONS)
+                                  base_seed=0, max_regions=CKPT_MAX_REGIONS,
+                                  games_per_worker=16, device='cpu')
     wall = time.perf_counter() - t0
     return {f'games{num_games}_w{num_workers}_b{budget}/wall_s': wall,
             f'games{num_games}_w{num_workers}_b{budget}/s_per_game': wall / num_games,
