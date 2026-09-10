@@ -51,98 +51,135 @@ DEFAULT_MAPS = [
 # Per-map eval worker (module-level for ProcessPoolExecutor pickling)
 # ---------------------------------------------------------------------------
 
-def _eval_worker(args):
-    """Play num_games games of MCTSGNNAgent vs MCTSAgent(uniform) on one map.
+_EVAL_STATE: Dict[str, Any] = {}
 
-    Alternates colors — half the games GNN plays agent_0, half agent_1.
-    Runs on CPU in a spawned subprocess.
+
+def _eval_init(state_dict_cpu, model_kwargs, max_turns, action_budget,
+               mcts_budget, max_regions):
+    """Pool initializer: build the policy once per worker process.
+
+    Per-map envs and agents are created lazily on first use and kept in
+    `_EVAL_STATE`, so a per-game task only carries (map, colour, seed).
     """
-    (state_dict_cpu, model_kwargs, map_name, max_turns, action_budget,
-     mcts_budget, num_games, base_seed, max_regions) = args
-
-    import numpy as np
     import torch
+    from parallel_risk.models.gnn_gcn import GCNPolicy
+
+    torch.set_num_threads(1)
+    policy = GCNPolicy(**model_kwargs)
+    policy.load_state_dict(state_dict_cpu)
+    policy.eval()
+    _EVAL_STATE.update(policy=policy, max_turns=max_turns, action_budget=action_budget,
+                       mcts_budget=mcts_budget, max_regions=max_regions, per_map={})
+
+
+def _eval_agents_for(map_name):
     from parallel_risk import ParallelRiskEnv
     from parallel_risk.agents.mcts_agent import MCTSAgent
     from parallel_risk.agents.mcts_gnn_agent import MCTSGNNAgent
     from parallel_risk.models.action_decoder import ActionDecoder
-    from parallel_risk.models.gnn_gcn import GCNPolicy
 
-    torch.set_num_threads(1)
-    np.random.seed(base_seed)
-    torch.manual_seed(base_seed)
+    st = _EVAL_STATE
+    if map_name not in st['per_map']:
+        env = ParallelRiskEnv(map_name=map_name, max_turns=st['max_turns'],
+                              reward_shaping_config=None)
+        decoder = ActionDecoder(action_budget=st['action_budget'], max_troops=20)
+        gnn_agent = MCTSGNNAgent(
+            policy=st['policy'], decoder=decoder, map_config=env.map_config,
+            simulation_budget=st['mcts_budget'], c_puct=1.4,
+            action_budget=st['action_budget'], max_turns=st['max_turns'],
+            device='cpu', max_regions=st['max_regions'],
+        )
+        uniform_agent = MCTSAgent.from_env(env, simulation_budget=st['mcts_budget'],
+                                           action_budget=st['action_budget'])
+        st['per_map'][map_name] = (env, gnn_agent, uniform_agent)
+    return st['per_map'][map_name]
 
-    policy = GCNPolicy(**model_kwargs)
-    policy.load_state_dict(state_dict_cpu)
-    policy.eval()
 
-    env = ParallelRiskEnv(map_name=map_name, max_turns=max_turns,
-                          reward_shaping_config=None)
-    decoder = ActionDecoder(action_budget=action_budget, max_troops=20)
-    gnn_agent = MCTSGNNAgent(
-        policy=policy, decoder=decoder, map_config=env.map_config,
-        simulation_budget=mcts_budget, c_puct=1.4, action_budget=action_budget,
-        max_turns=max_turns, device='cpu', max_regions=max_regions,
-    )
-    uniform_agent = MCTSAgent.from_env(env, simulation_budget=mcts_budget,
-                                       action_budget=action_budget)
+def _eval_worker(args):
+    """Play ONE game of MCTSGNNAgent vs MCTSAgent(uniform) on one map.
 
-    wins = losses = draws = 0
-    for g in range(num_games):
-        gnn_plays_0 = (g % 2 == 0)
-        obs, _ = env.reset(seed=base_seed + g)
-        done = False
-        while not done:
-            actions = {}
-            for aid in ('agent_0', 'agent_1'):
-                if aid not in obs:
-                    continue
-                pick_gnn = (aid == 'agent_0') == gnn_plays_0
-                if pick_gnn:
-                    actions[aid] = gnn_agent.get_action(env.game_state, aid)
-                else:
-                    actions[aid] = uniform_agent.get_action(env.game_state, aid)
-            obs, rewards, terms, truncs, _ = env.step(actions)
-            done = terms.get('__all__', False) or truncs.get('__all__', False)
+    One task per game (not per map) so the pool stays busy while the
+    30-territory games finish; `gnn_plays_0` alternates colors across the
+    games of a map. Runs on CPU in a spawned subprocess whose policy and
+    agents were built by `_eval_init`. Returns
+    (map_name, 'wins' | 'losses' | 'draws').
+    """
+    map_name, gnn_plays_0, seed = args
 
-        gnn_aid = 'agent_0' if gnn_plays_0 else 'agent_1'
-        opp_aid = 'agent_1' if gnn_plays_0 else 'agent_0'
-        r_g = float(rewards.get(gnn_aid, 0.0))
-        r_o = float(rewards.get(opp_aid, 0.0))
-        if r_g > r_o:
-            wins += 1
-        elif r_g < r_o:
-            losses += 1
-        else:
-            draws += 1
+    import numpy as np
+    import torch
 
-    total = max(wins + losses + draws, 1)
-    return map_name, {
-        'wins': wins, 'losses': losses, 'draws': draws,
-        'total': wins + losses + draws,
-        'win_rate': wins / total,
-        'draw_rate': draws / total,
-        # Head-to-head score: draws count half. Used for the dashboard and
-        # aggregate metric because several maps are draw-heavy.
-        'score': (wins + 0.5 * draws) / total,
-    }
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    env, gnn_agent, uniform_agent = _eval_agents_for(map_name)
+
+    obs, _ = env.reset(seed=seed)
+    done = False
+    while not done:
+        actions = {}
+        for aid in ('agent_0', 'agent_1'):
+            if aid not in obs:
+                continue
+            pick_gnn = (aid == 'agent_0') == gnn_plays_0
+            if pick_gnn:
+                actions[aid] = gnn_agent.get_action(env.game_state, aid)
+            else:
+                actions[aid] = uniform_agent.get_action(env.game_state, aid)
+        obs, rewards, terms, truncs, _ = env.step(actions)
+        done = terms.get('__all__', False) or truncs.get('__all__', False)
+
+    gnn_aid = 'agent_0' if gnn_plays_0 else 'agent_1'
+    opp_aid = 'agent_1' if gnn_plays_0 else 'agent_0'
+    r_g = float(rewards.get(gnn_aid, 0.0))
+    r_o = float(rewards.get(opp_aid, 0.0))
+    if r_g > r_o:
+        return map_name, 'wins'
+    if r_g < r_o:
+        return map_name, 'losses'
+    return map_name, 'draws'
 
 
 def evaluate_all_maps(policy, model_kwargs, map_names, max_turns, action_budget,
                       mcts_budget, num_games_per_map, num_workers, max_regions,
                       base_seed) -> Dict[str, Dict[str, float]]:
-    """Evaluate MCTS+GNN(current) vs MCTS(uniform) on every map, in parallel."""
+    """Evaluate MCTS+GNN(current) vs MCTS(uniform) on every map, in parallel.
+
+    Every game is its own pool task, submitted largest map first, so the
+    slow 30-territory games start early and the pool's tail stays short.
+    Game g of map i (in `map_names` order) resets its env with seed
+    `base_seed + i * 1000 + g`, the same seed the per-map scheduling used.
+    """
+    from parallel_risk.env.map_config import MapRegistry
+
     state_dict_cpu = {k: v.detach().cpu() for k, v in policy.state_dict().items()}
-    args_per_map = [
-        (state_dict_cpu, model_kwargs, m, max_turns, action_budget,
-         mcts_budget, num_games_per_map, base_seed + i * 1000, max_regions)
-        for i, m in enumerate(map_names)
-    ]
+    games = [(MapRegistry.get(m).n_territories, i, g, m)
+             for i, m in enumerate(map_names) for g in range(num_games_per_map)]
+    games.sort(key=lambda t: (-t[0], t[1], t[2]))
+    task_args = [(m, (g % 2 == 0), base_seed + i * 1000 + g) for _, i, g, m in games]
+
+    counts = {m: {'wins': 0, 'losses': 0, 'draws': 0} for m in map_names}
     ctx = mp.get_context('spawn')
+    with ProcessPoolExecutor(
+            max_workers=num_workers, mp_context=ctx, initializer=_eval_init,
+            initargs=(state_dict_cpu, model_kwargs, max_turns, action_budget,
+                      mcts_budget, max_regions)) as ex:
+        for map_name, outcome in ex.map(_eval_worker, task_args, chunksize=1):
+            counts[map_name][outcome] += 1
+
     per_map: Dict[str, Dict[str, float]] = {}
-    with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as ex:
-        for map_name, res in ex.map(_eval_worker, args_per_map):
-            per_map[map_name] = res
+    for m in map_names:
+        c = counts[m]
+        total = c['wins'] + c['losses'] + c['draws']
+        denom = max(total, 1)
+        per_map[m] = {
+            'wins': c['wins'], 'losses': c['losses'], 'draws': c['draws'],
+            'total': total,
+            'win_rate': c['wins'] / denom,
+            'draw_rate': c['draws'] / denom,
+            # Head-to-head score: draws count half. Used for the dashboard and
+            # aggregate metric because several maps are draw-heavy.
+            'score': (c['wins'] + 0.5 * c['draws']) / denom,
+        }
     return per_map
 
 
@@ -492,7 +529,7 @@ def main():
                 action_budget=K,
                 mcts_budget=args.mcts_budget,
                 num_games_per_map=args.num_eval_games,
-                num_workers=min(args.eval_workers, len(map_names)),
+                num_workers=args.eval_workers,
                 max_regions=trainer.max_regions,
                 base_seed=100000 + (it + 1) * 137,
             )

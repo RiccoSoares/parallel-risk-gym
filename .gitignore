@@ -84,3 +84,6 @@ dmypy.json
 checkpoints/
 ~/ray_results/
 runs/
+
+# benchmark/run logs
+experiments/benchmarks/*.log
