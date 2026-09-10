@@ -95,10 +95,17 @@ matching K.
 **Result.** Complete for K=5 and K=10. K=15/K=20 deferred after a
 ProcessPoolExecutor over-subscription hang (21 eval workers + 8
 rollout workers = deadlock on 8-core machine). Fixed by capping
-eval at `min(len(maps), 8)`. Per-map win-rate at 200 iters:
-- K=5: aggregate ~ 0.72
-- K=10: aggregate ~ 0.58 (drop-off)
+eval at `min(len(maps), 8)`. Per-map win-rate at 200 iters
+(the mean over the 21 maps of the final eval point, from
+`experiments/k_sweep_ppo_200/results_K5_K10.csv`, which is the data
+behind `dashboard_K5_K10.png`):
+- K=5: aggregate **0.800** (small 0.793, medium 0.867, large 0.622)
+- K=10: aggregate **0.521** (small 0.733, medium 0.445, large 0.111)
 - K=15, K=20: not yet run
+
+*(Correction, 2026-09-10: this entry previously said ~0.72 and ~0.58.
+Those numbers do not appear in the results files or the dashboard;
+the values above are what the committed data contains.)*
 
 **What it changes.** The K=5 → K=10 drop-off was initially
 attributed to "PPO gets harder to train with more action slots".
@@ -226,6 +233,74 @@ Commit: `1816864`.
    experiments (Q3/Q4) suggest the more actionable wins are (a)
    fixing the eval protocol and (b) raising eval-time search budget,
    not swapping GNN backbones.
+
+---
+
+## 8. K-sweep re-run on the optimized code (branch `perf/parallel-gpu`)
+
+**Setup.** The optimization branch changed how PPO collects rollouts:
+16 environments advance in lockstep and one batched forward serves them
+all, instead of one long trajectory per worker. That changes the sample
+composition and the order of random draws by design (the algorithm,
+GAE and update are untouched), so old and new PPO numbers are not
+bitwise comparable and the K-sweep had to be re-run before anything
+else on the branch could be trusted. Same config as §4 — 21 maps, 200
+iterations, batch 4096, 10 epochs, eval vs MCTS-50, 15 games per map —
+except 12 rollout workers instead of 8. Output in
+`experiments/k_sweep_ppo_200_perf/`; the originals are untouched.
+
+**Result.** Both K values came out uniformly stronger, and the K effect
+— the headline finding — is preserved exactly.
+
+| | Original | Re-run | Change |
+|---|---|---|---|
+| K=5 aggregate | 0.800 | 0.927 | +0.127 |
+| K=10 aggregate | 0.521 | 0.648 | +0.127 |
+| **K=5 − K=10 drop-off** | **+0.279** | **+0.279** | **0.000** |
+
+Per bucket:
+
+| Bucket | K=5 orig → new | K=10 orig → new |
+|---|---|---|
+| small (6-12) | 0.793 → 0.881 | 0.733 → 0.785 |
+| medium (16-22) | 0.867 → 0.956 | 0.445 → 0.659 |
+| large (28-30) | 0.622 → **0.978** | 0.111 → 0.200 |
+
+Three maps exceed two sigma at each K (about 1 expected by chance), all
+upward. Wall-clock 245 min → 68.7 min (3.6x): K=5 97.6 → 26.6, K=10
+147.4 → 42.1.
+
+**What holds.**
+1. **The K=5 → K=10 drop-off holds**, at +0.279 in both runs. Read with
+   Q4 (§7), which showed the MCTS opponent also strengthens with K, the
+   interpretation of §4 is unchanged.
+2. **Large maps stay hard at K=10**: 0.111 → 0.200, still the worst
+   bucket by far.
+3. **The corridor collapse at K=10 holds**: corridor_20 0.00 → 0.13,
+   corridor_22 0.00 → 0.27, corridor_28 0.00 → 0.00.
+
+**What does not hold.** The large-map weakness *at K=5* largely
+disappears: 0.622 → 0.978, with corridor_28 0.53 → 1.00, grid_30
+0.67 → 1.00, hub_ring_30 0.67 → 0.93. That looks partly like an
+artifact of the old rollout collection rather than a property of the
+maps: one long trajectory per worker makes a batch highly correlated in
+time, while 16 lockstep environments decorrelate it and spread coverage
+across maps, which is why parallel environments are standard in PPO
+implementations. Any claim resting on "PPO degrades on large maps"
+needs the qualifier "at K=10"; at K=5 it does not.
+
+**What it does not establish.** This is a *single* training run, so the
+21 maps are not 21 independent tests — they are 21 evaluations of one
+policy, and the per-map z-scores overstate the evidence because of that
+shared dependence. Two changes are also confounded: the rollout
+collection and 12 workers instead of 8. Before this is treated as a
+finding rather than a strong signal, run 2-3 seeds per K, and ideally
+one seed with 8 workers to separate the two changes.
+
+Scripts: `experiments/k_sweep_ppo.py` (unchanged),
+`experiments/compare_reruns.py` (new; per-map z-scores against the
+sampling noise of 15 eval games, bucket means, drop-off test).
+Branch: `perf/parallel-gpu`; `mcts_gnn_selfplay` and `main` untouched.
 
 ---
 
