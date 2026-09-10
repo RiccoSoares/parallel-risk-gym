@@ -27,6 +27,9 @@ model:
 
 training:
   num_workers: 4
+  num_envs: 16             # Envs stepped in lockstep per rollout process; each env draws its
+                           # map uniformly from map_names at every reset (see gnn_gcn.yaml)
+  rollout_device: "cpu"    # "cuda": collect in-process on the GPU (needs use_gpu: true)
   batch_size: 4096
   num_epochs: 10
   learning_rate: 1.0e-4

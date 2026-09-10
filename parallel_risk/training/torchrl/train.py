@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import copy
 import os
 import time
 import yaml
@@ -28,6 +29,10 @@ from torch_geometric.data import Batch
 from parallel_risk import ParallelRiskEnv
 from parallel_risk.env.reward_shaping import RewardShapingConfig
 from parallel_risk.training.torchrl.graph_wrapper import GraphObservationWrapper, env_to_graph
+from parallel_risk.training.torchrl.vec_rollout import (
+    LockstepRollout, arrays_from_numpy, arrays_to_numpy, build_rollout, map_edge_index,
+    merge_arrays,
+)
 from parallel_risk.models.gnn_gcn import GCNPolicy
 from parallel_risk.models.action_decoder import ActionDecoder
 
@@ -87,168 +92,50 @@ class TimingRecorder:
 # Parallel rollout worker — module-level so it is picklable by multiprocessing
 # ---------------------------------------------------------------------------
 
-def _rollout_worker(args):
+# The pool is persistent, so each worker process keeps its policy and lockstep
+# engine (envs included) across iterations; only the weights and seeds change.
+_WORKER_STATE = {}
+
+
+def _rollout_worker(args: Dict[str, Any]):
     """
-    Collect environment steps in a separate process.
+    Collect `num_steps` lockstep steps of `num_envs` envs in a worker process.
 
-    Returns a partial rollout dict with the same keys as PPOTrainer.collect_rollout,
-    but carrying raw PyG Data objects (picklable) rather than pre-batched Batch
-    objects.  The caller is responsible for re-batching before calling
-    update_policy.
+    `args` comes from PPOTrainer._build_worker_args. The policy runs on CPU in
+    eval mode with one torch thread (several workers share the machine and a
+    16-thread worker measured 1.7x slower than a 1-thread one). Returns the
+    compact numpy arrays of LockstepRollout.finish (see vec_rollout), which
+    the trainer merges and rebuilds on its own device.
     """
-    # max_regions is optional for backward compatibility with older args tuples
-    # (single-map runs that don't need padding).
-    if len(args) == 7:
-        (policy_state_dict, model_kwargs, env_configs, action_budget,
-         num_steps, base_seed, max_regions) = args
-    else:
-        (policy_state_dict, model_kwargs, env_configs, action_budget,
-         num_steps, base_seed) = args
-        max_regions = None
+    torch.set_num_threads(1)
+    key = (
+        tuple(args['map_names']), args['max_turns'], args['env_seed'],
+        args['use_reward_shaping'], args['action_budget'], args['max_regions'],
+        args['num_envs'], tuple(sorted(args['model_kwargs'].items())),
+    )
+    state = _WORKER_STATE.get(key)
+    if state is None:
+        policy = GCNPolicy(**args['model_kwargs'])
+        engine = LockstepRollout(
+            policy, ActionDecoder(action_budget=args['action_budget'], max_troops=20),
+            map_names=args['map_names'], num_envs=args['num_envs'],
+            action_budget=args['action_budget'], max_regions=args['max_regions'],
+            max_turns=args['max_turns'], env_seed=args['env_seed'],
+            use_reward_shaping=args['use_reward_shaping'],
+        )
+        _WORKER_STATE.clear()
+        state = _WORKER_STATE[key] = (policy, engine)
+    policy, engine = state
 
-    import torch
-    import numpy as np
-    from torch_geometric.data import Batch as _Batch
-    from parallel_risk import ParallelRiskEnv
-    from parallel_risk.env.reward_shaping import RewardShapingConfig
-    from parallel_risk.training.torchrl.graph_wrapper import GraphObservationWrapper
-    from parallel_risk.models.gnn_gcn import GCNPolicy as _GCNPolicy
-    from parallel_risk.models.action_decoder import ActionDecoder as _ActionDecoder
-
-    device = torch.device('cpu')
-
-    # Reconstruct policy from state dict
-    policy = _GCNPolicy(**model_kwargs).to(device)
-    policy.load_state_dict(policy_state_dict)
+    policy.load_state_dict(args['policy_state_dict'])
     policy.eval()
-    action_decoder = _ActionDecoder(action_budget=action_budget, max_troops=20)
-
-    # Build wrapped environments (one per map)
-    envs = []
-    map_names = []
-    for ecfg in env_configs:
-        reward_shaping_config = RewardShapingConfig() if ecfg.get('use_reward_shaping') else None
-        raw_env = ParallelRiskEnv(
-            map_name=ecfg['map_name'],
-            max_turns=ecfg.get('max_turns', 50),
-            seed=ecfg.get('seed'),
-            reward_shaping_config=reward_shaping_config,
-            max_actions_per_turn=max(10, action_budget),
-        )
-        envs.append(GraphObservationWrapper(
-            raw_env, device=device, max_regions=max_regions,
-        ))
-        map_names.append(ecfg['map_name'])
-
-    rollout = {
-        'observations': [],
-        'graph_lists': [],
-        'actions': [],
-        'rewards': [],
-        'values': [],
-        'log_probs': [],
-        'dones': [],
-        'batches': [],
-        'next_values': [],
-        'map_names': [],
-        'episode_rewards': [],
-        'episode_lengths': [],
-        'episode_rewards_per_map': {n: [] for n in map_names},
-    }
-
-    rng = np.random.RandomState(base_seed)
-    env_idx = rng.randint(len(envs))
-    current_env = envs[env_idx]
-    current_map_name = map_names[env_idx]
-    obs, _ = current_env.reset(seed=int(base_seed))
-    episode_reward = {agent: 0.0 for agent in obs}
-    episode_length = 0
-    steps_collected = 0
-
-    while steps_collected < num_steps:
-        if len(obs) == 0:
-            env_idx = rng.randint(len(envs))
-            current_env = envs[env_idx]
-            current_map_name = map_names[env_idx]
-            obs, _ = current_env.reset(seed=int(base_seed + steps_collected))
-            episode_reward = {agent: 0.0 for agent in obs}
-            episode_length = 0
-
-        graphs = [obs[agent] for agent in sorted(obs.keys())]
-        batched_graph = _Batch.from_data_list(graphs)
-
-        with torch.no_grad():
-            action_logits, values, _ = policy(batched_graph)
-
-        actions_tensor, log_probs = action_decoder.decode_actions(
-            action_logits, batched_graph.batch,
-            deterministic=False, return_log_probs=True, observations=graphs,
-        )
-
-        # Env-side padding target: default max(10, action_budget) matches
-        # the env's default max_actions_per_turn while scaling up for K > 10.
-        env_max_actions = max(10, action_budget)
-        actions_dict = {}
-        for i, agent in enumerate(sorted(obs.keys())):
-            action_array = actions_tensor[i].cpu().numpy()
-            actions_dict[agent] = {
-                'num_actions': action_budget,
-                'actions': np.vstack([action_array,
-                                      np.zeros((env_max_actions - action_budget, 3))]),
-            }
-
-        next_obs, rewards, terminateds, truncateds, _ = current_env.step(actions_dict)
-
-        for agent in rewards:
-            episode_reward[agent] = episode_reward.get(agent, 0.0) + rewards[agent]
-        episode_length += 1
-
-        done = terminateds.get('__all__', False) or truncateds.get('__all__', False)
-        is_terminated = terminateds.get('__all__', False)
-        agent_keys = [k for k in sorted(rewards.keys()) if k != '__all__']
-
-        if is_terminated:
-            next_value = torch.zeros(len(agent_keys), device=device)
-        else:
-            next_graphs = [next_obs[agent] for agent in sorted(next_obs.keys())]
-            if next_graphs:
-                next_batched = _Batch.from_data_list(next_graphs)
-                with torch.no_grad():
-                    _, nv, _ = policy(next_batched)
-                    next_value = nv.squeeze(-1)
-            else:
-                next_value = torch.zeros(len(agent_keys), device=device)
-
-        rollout['observations'].append(batched_graph)
-        rollout['graph_lists'].append(graphs)
-        rollout['actions'].append(actions_tensor)
-        rollout['rewards'].append(torch.tensor(
-            [rewards[agent] for agent in agent_keys], device=device))
-        rollout['values'].append(values.squeeze(-1))
-        rollout['log_probs'].append(log_probs)
-        rollout['dones'].append(torch.tensor(
-            [done for _ in agent_keys], dtype=torch.bool, device=device))
-        rollout['batches'].append(batched_graph.batch)
-        rollout['next_values'].append(next_value)
-        steps_collected += 1
-
-        if done:
-            rollout['episode_rewards'].append(episode_reward.get('agent_0', 0.0))
-            rollout['episode_lengths'].append(episode_length)
-            rollout['map_names'].append(current_map_name)
-            rollout['episode_rewards_per_map'][current_map_name].append(
-                episode_reward.get('agent_0', 0.0))
-
-            env_idx = rng.randint(len(envs))
-            current_env = envs[env_idx]
-            current_map_name = map_names[env_idx]
-            obs, _ = current_env.reset(seed=int(base_seed + steps_collected))
-            episode_reward = {agent: 0.0 for agent in obs}
-            episode_length = 0
-        else:
-            obs = next_obs
-
-    return rollout
+    seed = int(args['seed'])
+    # Per-worker, per-iteration streams: action sampling (torch), map choice
+    # (rng) and env reset seeds all derive from the worker seed.
+    torch.manual_seed(seed)
+    engine.rng = np.random.RandomState(seed)
+    engine.reset_seed_base = seed
+    return arrays_to_numpy(engine.collect(args['num_steps']))
 
 
 class RunningMeanStd:
@@ -408,6 +295,24 @@ class PPOTrainer:
         self.value_loss_coeff = train_config.get('value_loss_coeff', 0.5)
         self.max_grad_norm = train_config.get('max_grad_norm', 0.5)
 
+        # Rollout layout (see vec_rollout.py). num_envs envs are stepped in
+        # lockstep per rollout process, so a rollout of S env steps is a
+        # [S // num_envs, 2 * num_envs] grid of samples. rollout_device='cuda'
+        # collects in the trainer process on the GPU (one batched forward per
+        # step; best with num_envs >= 64) instead of in CPU workers.
+        self.num_envs = int(train_config.get('num_envs', 16))
+        if self.num_envs < 1:
+            raise ValueError(f"training.num_envs must be >= 1, got {self.num_envs}")
+        self.rollout_device = str(train_config.get('rollout_device', 'cpu'))
+        if self.rollout_device not in ('cpu', 'cuda'):
+            raise ValueError(f"training.rollout_device must be 'cpu' or 'cuda', got {self.rollout_device!r}")
+        if self.rollout_device == 'cuda' and self.device.type != 'cuda':
+            print("rollout_device='cuda' requires use_gpu=true and a CUDA device; collecting on CPU")
+            self.rollout_device = 'cpu'
+        if self.rollout_device == 'cuda' and self.num_workers > 1:
+            print(f"rollout_device='cuda': rollouts run in the trainer process on the GPU "
+                  f"({self.num_envs} envs in lockstep); num_workers={self.num_workers} is not used for collection")
+
         # Model configuration
         model_config = config['model']
         self.action_budget = env_config.get('action_budget', 5)
@@ -453,11 +358,23 @@ class PPOTrainer:
         # Persistent worker pool — created once to amortize spawn overhead
         self._worker_pool = None
 
+        # In-process lockstep engine (built on first use) and, when the trainer
+        # policy lives on CUDA but rollouts run on CPU, a CPU copy of the policy
+        # whose weights are synced before every collection.
+        self._rollout_engine = None
+        self._rollout_policy = None
+        self._warned_uneven_steps = False
+
+        # Map-constant edge_index per map (order of self.map_names), cached per device.
+        self._edge_index_cpu = [map_edge_index(m, self.max_regions) for m in self.map_names]
+        self._edge_index_by_device = {}
+
         # Timing (no-op unless .enabled = True; used by --profile)
         self.timers = TimingRecorder(device=self.device)
 
-    def _build_worker_args(self, worker_seed: int, steps_each: int):
-        """Build args tuple for _rollout_worker."""
+    def _build_worker_args(self, worker_seed: int, num_steps: int):
+        """Build the args dict for _rollout_worker (num_steps lockstep steps of num_envs envs)."""
+        env_config = self.config['env']
         model_kwargs = dict(
             node_features_dim=self.node_features_dim,
             global_features_dim=self.global_features_dim,
@@ -467,239 +384,106 @@ class PPOTrainer:
             max_troops=20,
             dropout=self.policy.dropout,
         )
-        env_config = self.config['env']
-        env_configs = [
-            {
-                'map_name': name,
-                'max_turns': env_config.get('max_turns', 50),
-                'seed': env_config.get('seed'),
-                'use_reward_shaping': env_config.get('use_reward_shaping', True),
-            }
-            for name in self.map_names
-        ]
-        state_dict = {k: v.cpu() for k, v in self.policy.state_dict().items()}
-        return (state_dict, model_kwargs, env_configs, self.action_budget,
-                steps_each, worker_seed, self.max_regions)
+        return {
+            'policy_state_dict': {k: v.cpu() for k, v in self.policy.state_dict().items()},
+            'model_kwargs': model_kwargs,
+            'map_names': list(self.map_names),
+            'max_turns': env_config.get('max_turns', 100),
+            'env_seed': env_config.get('seed'),
+            'use_reward_shaping': env_config.get('use_reward_shaping', True),
+            'action_budget': self.action_budget,
+            'max_regions': self.max_regions,
+            'num_envs': self.num_envs,
+            'num_steps': num_steps,
+            'seed': worker_seed,
+        }
+
+    def _lockstep_steps(self, env_steps: int) -> int:
+        """Lockstep steps T so that T * num_envs env steps are collected per process."""
+        T = max(1, env_steps // self.num_envs)
+        if T * self.num_envs != env_steps and not self._warned_uneven_steps:
+            print(f"collect_rollout: {env_steps} env steps is not a multiple of num_envs={self.num_envs}; "
+                  f"collecting {T * self.num_envs} per rollout process")
+            self._warned_uneven_steps = True
+        return T
+
+    def _edge_index_on(self, device: torch.device):
+        key = str(device)
+        if key not in self._edge_index_by_device:
+            self._edge_index_by_device[key] = [ei.to(device) for ei in self._edge_index_cpu]
+        return self._edge_index_by_device[key]
+
+    def _finish_rollout(self, arrays):
+        """Record episode stats from a merged collection and rebuild the rollout dict on self.device."""
+        self.episode_rewards.extend(arrays['episode_rewards'])
+        self.episode_lengths.extend(arrays['episode_lengths'])
+        for map_name, reward in zip(arrays['episode_map_names'], arrays['episode_rewards']):
+            self.episode_rewards_per_map[map_name].append(reward)
+        with self.timers.section('rollout.rebuild'):
+            return build_rollout(arrays, self._edge_index_on(self.device), self.device)
 
     def collect_rollout(self, num_steps: int):
         """
         Collect experience by running the policy in the environment.
 
-        When num_workers > 1, spawns worker processes to collect episodes in
-        parallel (each worker gets num_steps // num_workers target steps).
-        Workers use independent copies of the current policy weights.
-
-        Args:
-            num_steps: Number of environment steps to collect
+        `num_steps` env steps (2 samples each) are collected as a lockstep grid
+        of [T, B] samples (see vec_rollout.py). With num_workers > 1 and
+        rollout_device='cpu' the persistent worker pool collects num_steps //
+        num_workers env steps per worker with the current weights, and the
+        workers' columns are concatenated; otherwise the trainer process
+        collects on rollout_device.
 
         Returns:
-            rollout: Dict containing collected experience
+            rollout: dict with lists (length T) of per-step tensors on
+                self.device — 'rewards', 'values', 'log_probs', 'dones',
+                'next_values', 'terminateds' [B, ...], 'actions' [B, K, 3] —
+                'graph_lists' (T lists of B Data) and 'map_names' (one entry
+                per completed episode).
         """
         with self.timers.section('rollout.total'):
-            if self.num_workers > 1:
+            if self.num_workers > 1 and self.rollout_device == 'cpu':
                 return self._collect_rollout_parallel(num_steps)
             return self._collect_rollout_sequential(num_steps)
 
     def _collect_rollout_parallel(self, num_steps: int):
-        """Parallel version: reuses persistent worker pool across iterations."""
+        """Pool workers collect on CPU and return compact arrays; merged along the column axis."""
         if self._worker_pool is None:
             ctx = mp.get_context('spawn')
             self._worker_pool = ctx.Pool(processes=self.num_workers)
 
-        steps_each = max(1, num_steps // self.num_workers)
+        T = self._lockstep_steps(max(1, num_steps // self.num_workers))
         worker_args = [
-            self._build_worker_args(worker_seed=self.global_step * 100 + w, steps_each=steps_each)
+            self._build_worker_args(worker_seed=self.global_step * 100 + w, num_steps=T)
             for w in range(self.num_workers)
         ]
-
         with self.timers.section('rollout.pool_map'):
-            worker_rollouts = self._worker_pool.map(_rollout_worker, worker_args)
+            worker_arrays = self._worker_pool.map(_rollout_worker, worker_args)
+        return self._finish_rollout(merge_arrays([arrays_from_numpy(a) for a in worker_arrays]))
 
-        # Merge all worker rollouts into one
-        merged = {
-            'observations': [],
-            'graph_lists': [],
-            'actions': [],
-            'rewards': [],
-            'values': [],
-            'log_probs': [],
-            'dones': [],
-            'batches': [],
-            'next_values': [],
-            'map_names': [],
-        }
-        for wr in worker_rollouts:
-            merged['observations'].extend(wr['observations'])
-            merged['graph_lists'].extend(wr['graph_lists'])
-            merged['actions'].extend(wr['actions'])
-            merged['rewards'].extend(wr['rewards'])
-            merged['values'].extend(wr['values'])
-            merged['log_probs'].extend(wr['log_probs'])
-            merged['dones'].extend(wr['dones'])
-            merged['batches'].extend(wr['batches'])
-            merged['next_values'].extend(wr['next_values'])
-            merged['map_names'].extend(wr['map_names'])
-            # Aggregate episode-level stats into trainer state
-            self.episode_rewards.extend(wr['episode_rewards'])
-            self.episode_lengths.extend(wr['episode_lengths'])
-            for map_name, rewards in wr['episode_rewards_per_map'].items():
-                if map_name in self.episode_rewards_per_map:
-                    self.episode_rewards_per_map[map_name].extend(rewards)
-
-        # Workers build rollouts on CPU (see _rollout_worker). Move everything
-        # to the trainer's device so update_policy runs on GPU when configured.
-        if self.device.type != 'cpu':
-            merged = self._move_rollout_to_device(merged, self.device)
-        return merged
-
-    def _move_rollout_to_device(self, rollout, device):
-        """Move a rollout dict (from CPU workers) onto the trainer's device."""
-        def _mv(x):
-            return x.to(device, non_blocking=True) if hasattr(x, 'to') else x
-        # PyG Batch objects and individual Data objects both support .to()
-        rollout['observations'] = [_mv(b) for b in rollout['observations']]
-        rollout['graph_lists'] = [[_mv(g) for g in gl] for gl in rollout['graph_lists']]
-        for key in ('actions', 'rewards', 'values', 'log_probs',
-                    'dones', 'batches', 'next_values'):
-            rollout[key] = [_mv(t) for t in rollout[key]]
-        return rollout
+    def _inprocess_rollout_policy(self):
+        """Policy used by the in-process engine: self.policy, or a synced CPU copy of it."""
+        if self.rollout_device == self.device.type:
+            return self.policy
+        if self._rollout_policy is None:
+            self._rollout_policy = copy.deepcopy(self.policy).to('cpu')
+        self._rollout_policy.load_state_dict(self.policy.state_dict())
+        self._rollout_policy.train(self.policy.training)  # same dropout behaviour as self.policy
+        return self._rollout_policy
 
     def _collect_rollout_sequential(self, num_steps: int):
-        """Original sequential rollout collection (num_workers == 1)."""
-        rollout = {
-            'observations': [],
-            'graph_lists': [],  # Individual graphs for action masking
-            'actions': [],
-            'rewards': [],
-            'values': [],
-            'log_probs': [],
-            'dones': [],
-            'batches': [],  # Batch indices for graph data
-            'next_values': [],  # Next state values for GAE (Bug #2 fix: store per-timestep)
-            'map_names': [],  # episode-level list (one entry per completed episode)
-        }
-
-        # Randomly pick starting environment (uniform over maps)
-        current_env_idx = np.random.randint(len(self.envs))
-        current_env = self.envs[current_env_idx]
-        current_map_name = self.map_names[current_env_idx]
-
-        # Reset environment
-        obs, _ = current_env.reset()
-
-        episode_reward = {agent: 0.0 for agent in obs.keys()}
-        episode_length = 0
-
-        steps_collected = 0
-        while steps_collected < num_steps:
-            # Check if we need to reset (episode ended)
-            if len(obs) == 0:
-                current_env_idx = np.random.randint(len(self.envs))
-                current_env = self.envs[current_env_idx]
-                current_map_name = self.map_names[current_env_idx]
-                obs, _ = current_env.reset()
-                episode_reward = {agent: 0.0 for agent in obs.keys()}
-                episode_length = 0
-
-            # Convert observations to batch
-            graphs = [obs[agent] for agent in sorted(obs.keys())]
-            batched_graph = Batch.from_data_list(graphs)
-            batch_size = len(graphs)
-
-            # Forward pass through policy
-            with torch.no_grad():
-                action_logits, values, _ = self.policy(batched_graph)
-
-            # Sample actions with masking using graph observations
-            actions_tensor, log_probs = self.action_decoder.decode_actions(
-                action_logits, batched_graph.batch, deterministic=False, return_log_probs=True,
-                observations=graphs
+        """In-process collection on rollout_device (num_workers == 1 or rollout_device='cuda')."""
+        policy = self._inprocess_rollout_policy()
+        if self._rollout_engine is None or self._rollout_engine.policy is not policy:
+            env_config = self.config['env']
+            self._rollout_engine = LockstepRollout(
+                policy, self.action_decoder, map_names=self.map_names, num_envs=self.num_envs,
+                action_budget=self.action_budget, max_regions=self.max_regions,
+                max_turns=env_config.get('max_turns', 100), env_seed=env_config.get('seed'),
+                use_reward_shaping=env_config.get('use_reward_shaping', True),
             )
-
-            # Convert actions to environment format
-            env_max_actions = max(10, self.action_budget)
-            actions_dict = {}
-            for i, agent in enumerate(sorted(obs.keys())):
-                # Convert from tensor to numpy and then to tuple format expected by env
-                action_array = actions_tensor[i].cpu().numpy()  # [action_budget, 3]
-                actions_dict[agent] = {
-                    'num_actions': self.action_budget,
-                    'actions': np.vstack([action_array, np.zeros((env_max_actions - self.action_budget, 3))])
-                }
-
-            # Step environment
-            next_obs, rewards, terminateds, truncateds, infos = current_env.step(actions_dict)
-
-            # Track episode stats
-            for agent in rewards.keys():
-                episode_reward[agent] += rewards[agent]
-            episode_length += 1
-
-            # Check if episode ended
-            done = terminateds.get('__all__', False) or truncateds.get('__all__', False)
-            is_truncated = truncateds.get('__all__', False)
-            is_terminated = terminateds.get('__all__', False)
-
-            # Store experience (before checking done, so we have consistent batch sizes)
-            # Only include actual agent keys, not '__all__'
-            agent_keys = [k for k in sorted(rewards.keys()) if k != '__all__']
-
-            # Compute next_value for GAE bootstrapping
-            # Key distinction:
-            #   - Terminated: game naturally ended (victory/elimination) -> bootstrap with 0
-            #   - Truncated: game artificially cut off (turn limit) -> bootstrap with V(s')
-            # This is critical for learning: truncation means the game WOULD continue,
-            # so the value estimate should account for potential future rewards.
-            if is_terminated:
-                # True termination (victory/elimination): no future value
-                next_value = torch.zeros(len(agent_keys), device=self.device)
-            else:
-                # Non-terminal OR truncated: compute value of next state for bootstrapping
-                next_graphs = [next_obs[agent] for agent in sorted(next_obs.keys())]
-                next_batched_graph = Batch.from_data_list(next_graphs)
-                with torch.no_grad():
-                    _, next_value, _ = self.policy(next_batched_graph)
-                    next_value = next_value.squeeze(-1)  # [batch_size]
-
-            rollout['observations'].append(batched_graph)
-            rollout['graph_lists'].append(graphs)  # Store individual graphs for masking
-            rollout['actions'].append(actions_tensor)
-            rollout['rewards'].append(torch.tensor([rewards[agent] for agent in agent_keys], device=self.device))
-            rollout['values'].append(values.squeeze(-1))  # [batch_size]
-            rollout['log_probs'].append(log_probs)  # [batch_size, action_budget]
-            # Store episode boundaries (both terminated AND truncated) for GAE propagation masking
-            # GAE should not propagate across episode boundaries regardless of termination type
-            rollout['dones'].append(torch.tensor([done for _ in agent_keys], dtype=torch.bool, device=self.device))
-            rollout['batches'].append(batched_graph.batch)
-            rollout['next_values'].append(next_value)  # Stores V(s') for truncated, 0 for terminated
-
-            steps_collected += 1
-
-            if done:
-                # Log episode stats
-                # In self-play, rewards are symmetric (one wins, one loses)
-                # Track agent_0's reward to monitor learning progress
-                agent_0_reward = episode_reward.get('agent_0', 0.0)
-                self.episode_rewards.append(agent_0_reward)
-                self.episode_lengths.append(episode_length)
-
-                # Per-map tracking
-                self.episode_rewards_per_map[current_map_name].append(agent_0_reward)
-                rollout['map_names'].append(current_map_name)
-
-                # Sample new environment (uniform over maps) for next episode
-                current_env_idx = np.random.randint(len(self.envs))
-                current_env = self.envs[current_env_idx]
-                current_map_name = self.map_names[current_env_idx]
-
-                # Reset for next episode
-                obs, _ = current_env.reset()
-                episode_reward = {agent: 0.0 for agent in obs.keys()}
-                episode_length = 0
-            else:
-                obs = next_obs
-
-        return rollout
+        with self.timers.section('rollout.collect'):
+            arrays = self._rollout_engine.collect(self._lockstep_steps(num_steps))
+        return self._finish_rollout(arrays)
 
     def compute_gae(self, rewards, values, dones, next_values):
         """
@@ -788,7 +572,7 @@ class PPOTrainer:
 
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        T = len(rollout['observations'])
+        T = len(rollout['rewards'])
         B = rollout['rewards'][0].size(0)
 
         # Pre-stack old values (computed at collection time; detached)
