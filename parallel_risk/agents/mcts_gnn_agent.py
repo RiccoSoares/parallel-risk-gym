@@ -5,6 +5,10 @@ Wires a `GCNPolicy` into `DuctMCTS` in three places:
   - as the action sampler for progressive widening,
   - as the prior over actions in the PUCT selection formula.
 
+The value and prior hooks are served by `GNNEvaluator`, a per-search cache
+that runs one forward per (state, agent) and answers every value_fn /
+policy_fn call about that graph from the cached outputs.
+
 Preserves the existing MCTS baseline: when this class is not used,
 `DuctMCTS` behaves identically to before (see the `policy_fn=None` branch
 in `parallel_risk/agents/mcts_agent.py`).
@@ -16,7 +20,7 @@ import numpy as np
 
 try:
     import torch
-    from torch_geometric.data import Batch
+    from torch_geometric.data import Batch, Data
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
@@ -83,6 +87,248 @@ class GNNActionSampler:
         return {'num_actions': self.action_budget, 'actions': actions_array}
 
 
+class EvalEntry:
+    """Cached outputs of one GNN forward for one (state, agent) graph.
+
+    Attributes:
+        action_logits: list of `action_budget` dicts with 'source' [n],
+            'dest' [n] and 'troops' [1, max_troops] tensors for this graph
+            only (a single-graph forward, or the slice of a paired one).
+        batched: the graph as `ActionDecoder` expects a pre-batched
+            observation (`batched_obs=`): a `Data` carrying x, edge_index,
+            global_features and a zero `batch` vector.
+        value_tensor: the value head output for this graph, shape [1].
+        value: python float of `value_tensor`, materialized on first use so
+            a state whose prior is needed but whose value never is does not
+            pay a device sync.
+        slot_batched, slot_logits: the same graph and logits in slot-major
+            layout (K copies of the graph, copy k carrying slot k's logits),
+            built by `GNNEvaluator._slot_major` on the first prior request.
+    """
+
+    __slots__ = ('action_logits', 'batched', 'value_tensor', 'value',
+                 'slot_batched', 'slot_logits')
+
+    def __init__(self, action_logits, batched, value_tensor):
+        self.action_logits = action_logits
+        self.batched = batched
+        self.value_tensor = value_tensor
+        self.value = None
+        self.slot_batched = None
+        self.slot_logits = None
+
+
+class GNNEvaluator:
+    """Per-search cache of GNN outputs: one forward per (state, agent).
+
+    `DuctMCTS` asks the network about the same (state, agent) graph up to
+    four times per node: the leaf value for agent_0 and the prior of every
+    action progressive widening samples for each agent. All of them are
+    functions of one forward pass, so the evaluator runs it once, keeps the
+    outputs, and serves `value_fn` / `policy_fn` from the cache. The action
+    log-prob is computed with `decoder.compute_log_probs` on the cached
+    logits through its pre-batched geometry path (`batched_obs=`), so every
+    number the search consumes is bit-identical to what the uncached
+    closures produced.
+
+    The prior of a K-slot action is evaluated in slot-major layout: a batch
+    of K copies of the graph where copy k carries slot k's logits and slot
+    k's (source, dest, troops), so one decoder call does three masked
+    log-softmaxes over [K, n] instead of K x 3 over [1, n]. Each row is the
+    same computation on the same numbers, and the sum over K is the same
+    reduction, so the result is bit-identical to the per-slot loop
+    (checked exactly in tests/test_mcts_gnn_agent.py) at about a third of
+    the cost.
+
+    Interface (the seam a cross-game batched evaluator will implement):
+        new_search()                    clear the cache. `DuctMCTS.make_root`
+                                        calls it, so the cache never outlives
+                                        the search it was filled in.
+        evaluate(game_state, agent_id)  -> EvalEntry, from cache or one forward.
+        value_fn(game_state, agent_id)  -> float    (DuctMCTS.value_fn contract)
+        policy_fn(game_state, agent_id, action_dict) -> float
+                                                    (DuctMCTS.policy_fn contract)
+
+    A batched GPU version serving N concurrent games only has to fill
+    `EvalEntry` objects for many keys from one forward (an `evaluate_many`
+    over pending (game_state, agent_id) requests); `EvalEntry`'s layout and
+    the two DuctMCTS-facing methods stay as they are.
+
+    Cache key: (ownership bytes, troops bytes, turn, that agent's available
+    income, agent id). Those five things determine the observation, hence the
+    graph. Entries are only valid while the policy weights are frozen, which
+    holds within one search.
+
+    pair_agents=True forwards both agents' graphs of a state in one batch of
+    2, halving the forward count. The batched CPU kernels reduce in a
+    different order, so priors and values then differ from the single-graph
+    forward (observed: up to 8e-6 on summed log-probs, 2e-7 on values) and
+    a PUCT argmax can flip; it is off by default because the golden harness
+    requires bit-identity.
+
+    Counters `n_forwards`, `n_graphs`, `n_hits`, `n_misses` describe the
+    current search (reset by `new_search`).
+    """
+
+    def __init__(self, policy, decoder, map_config: MapConfig,
+                 simulator: RiskSimulator, action_budget: int, device,
+                 max_regions: int = None, pair_agents: bool = False):
+        self.policy = policy
+        self.decoder = decoder
+        self.map_config = map_config
+        self.simulator = simulator
+        self.action_budget = action_budget
+        self.device = torch.device(device) if isinstance(device, str) else device
+        self.max_regions = (
+            max_regions if max_regions is not None else len(map_config.regions)
+        )
+        self.pair_agents = pair_agents
+        self._cache = {}
+        # Slot-major geometry shared by every entry of this map: node k*n+i
+        # is territory i of copy k. The replicated edge_index is derived
+        # from the first graph seen (it is a map constant).
+        n = map_config.n_territories
+        self._slot_batch = torch.arange(
+            action_budget, dtype=torch.long, device=self.device).repeat_interleave(n)
+        self._slot_edge_index = None
+        self.new_search()
+
+    def new_search(self) -> None:
+        """Drop every cached evaluation and reset the per-search counters."""
+        self._cache.clear()
+        self.n_forwards = 0
+        self.n_graphs = 0
+        self.n_hits = 0
+        self.n_misses = 0
+
+    @staticmethod
+    def _key(game_state: dict, agent_id: str) -> tuple:
+        return (
+            game_state['territory_ownership'].tobytes(),
+            game_state['territory_troops'].tobytes(),
+            int(game_state['turn_number']),
+            int(game_state['available_income'][agent_id]),
+            agent_id,
+        )
+
+    def _graph(self, game_state: dict, agent_id: str):
+        obs = self.simulator.state_to_obs(game_state, agent_id)
+        return env_to_graph(obs, self.map_config, self.device,
+                            max_regions=self.max_regions)
+
+    @staticmethod
+    def _as_batched(graph):
+        """Give a single graph the `batch` vector a batch-of-1 would carry.
+
+        Value-identical to `Batch.from_data_list([graph])` for the fields the
+        policy and the decoder read (x, edge_index, global_features, batch)
+        without the collate cost.
+        """
+        graph.batch = torch.zeros(graph.num_nodes, dtype=torch.long,
+                                  device=graph.x.device)
+        return graph
+
+    def evaluate(self, game_state: dict, agent_id: str) -> EvalEntry:
+        """Return the cached forward outputs for (state, agent), computing on a miss."""
+        key = self._key(game_state, agent_id)
+        entry = self._cache.get(key)
+        if entry is not None:
+            self.n_hits += 1
+            return entry
+        self.n_misses += 1
+        if self.pair_agents:
+            self._forward_pair(game_state)
+        else:
+            self._forward_single(game_state, agent_id, key)
+        return self._cache[key]
+
+    def _forward_single(self, game_state: dict, agent_id: str, key: tuple) -> None:
+        batched = self._as_batched(self._graph(game_state, agent_id))
+        with torch.no_grad():
+            action_logits, values, _ = self.policy(batched)
+        self.n_forwards += 1
+        self.n_graphs += 1
+        self._cache[key] = EvalEntry(action_logits, batched, values[0])
+
+    def _forward_pair(self, game_state: dict) -> None:
+        """One batch-of-2 forward filling the entries of both agents."""
+        agents = self.simulator.AGENTS
+        graphs = [self._graph(game_state, a) for a in agents]
+        batched = Batch.from_data_list(graphs)
+        with torch.no_grad():
+            action_logits, values, _ = self.policy(batched)
+        self.n_forwards += 1
+        self.n_graphs += len(graphs)
+        n = self.map_config.n_territories
+        for gi, agent_id in enumerate(agents):
+            nodes = slice(gi * n, (gi + 1) * n)
+            logits_i = [{'source': d['source'][nodes],
+                         'dest': d['dest'][nodes],
+                         'troops': d['troops'][gi:gi + 1]} for d in action_logits]
+            self._cache[self._key(game_state, agent_id)] = EvalEntry(
+                logits_i, self._as_batched(graphs[gi]), values[gi])
+
+    def _slot_major(self, entry: EvalEntry) -> None:
+        """Build the K-copy geometry and slot-major logits of an entry once."""
+        graph = entry.batched
+        K = self.action_budget
+        n = self.map_config.n_territories
+        if self._slot_edge_index is None:
+            self._slot_edge_index = torch.cat(
+                [graph.edge_index + k * n for k in range(K)], dim=1)
+        rep = Data(x=graph.x.repeat(K, 1), edge_index=self._slot_edge_index,
+                   num_nodes=K * n)
+        rep.global_features = graph.global_features.repeat(K, 1)
+        rep.batch = self._slot_batch
+        entry.slot_batched = rep
+        entry.slot_logits = [{
+            'source': torch.cat([d['source'] for d in entry.action_logits]),
+            'dest': torch.cat([d['dest'] for d in entry.action_logits]),
+            'troops': torch.cat([d['troops'] for d in entry.action_logits], dim=0),
+        }]
+
+    def value_fn(self, game_state: dict, agent_id: str) -> float:
+        """V(state) from agent_id's perspective.
+
+        `DuctMCTS._rollout` always calls this for 'agent_0' and negates for
+        'agent_1' (zero-sum). Because obs is agent-relative and the GNN was
+        trained via self-play, the raw value output is already in the
+        observing agent's frame; no sign flip needed on our side.
+        """
+        entry = self.evaluate(game_state, agent_id)
+        if entry.value is None:
+            entry.value = float(entry.value_tensor.item())
+        return entry.value
+
+    def policy_fn(self, game_state: dict, agent_id: str, action_dict: dict) -> float:
+        """log P(action | state, agent) under the GNN, summed over the K slots.
+
+        Assumes `action_dict['num_actions'] == action_budget` (the GNN always
+        emits exactly `action_budget` slots). Fails loudly otherwise rather
+        than silently misaligning shapes.
+        """
+        num_actions = int(action_dict['num_actions'])
+        if num_actions != self.action_budget:
+            raise ValueError(
+                f"policy_fn expects num_actions == action_budget ({self.action_budget}), "
+                f"got {num_actions}. This adapter only supports GNN-emitted actions."
+            )
+        entry = self.evaluate(game_state, agent_id)
+        if entry.slot_batched is None:
+            self._slot_major(entry)
+        actions_tensor = torch.as_tensor(
+            action_dict['actions'][:self.action_budget], dtype=torch.long, device=self.device
+        ).unsqueeze(1)  # [action_budget, 1, 3]: copy k evaluates slot k
+        with torch.no_grad():
+            log_probs = self.decoder.compute_log_probs(
+                entry.slot_logits,
+                actions_tensor,
+                self._slot_batch,
+                batched_obs=entry.slot_batched,
+            )  # [action_budget, 1]
+        return float(log_probs.sum().item())
+
+
 class MCTSGNNAgent:
     """Decoupled UCT with PUCT selection guided by a trained GNN.
 
@@ -112,6 +358,7 @@ class MCTSGNNAgent:
         pw_sampler: str = 'masked_random',
         use_value_fn: bool = True,
         max_actions_per_turn: int = None,
+        pair_agents: bool = False,
     ):
         """
         pw_sampler:
@@ -133,6 +380,13 @@ class MCTSGNNAgent:
               MCTS). Useful at cold-start when the GNN's value predictions
               are random noise around 0 and would otherwise wipe out the
               Q signal. Effectively "MCTS + GNN prior only".
+
+        pair_agents:
+            - False (default): one single-graph forward per (state, agent);
+              priors and values bit-identical to the uncached closures.
+            - True: both agents' graphs of a state share one batch-of-2
+              forward (half the forwards, results within ~1e-5). See
+              `GNNEvaluator`.
         """
         if not TORCH_AVAILABLE:
             raise ImportError(
@@ -185,7 +439,18 @@ class MCTSGNNAgent:
         simulator = RiskSimulator(map_config, max_turns=max_turns)
 
         self.use_value_fn = use_value_fn
-        value_fn = self._build_value_fn(simulator) if use_value_fn else None
+        # One forward per (state, agent) per search; DuctMCTS.make_root
+        # resets it through the `evaluator` hook.
+        self.evaluator = GNNEvaluator(
+            policy=policy,
+            decoder=decoder,
+            map_config=map_config,
+            simulator=simulator,
+            action_budget=action_budget,
+            device=self.device,
+            max_regions=self.max_regions,
+            pair_agents=pair_agents,
+        )
 
         self.mcts = DuctMCTS(
             simulator=simulator,
@@ -194,9 +459,10 @@ class MCTSGNNAgent:
             uct_c=uct_c,
             pw_alpha=pw_alpha,
             max_rollout_turns=max_rollout_turns,
-            value_fn=value_fn,
-            policy_fn=self._build_policy_fn(simulator),
+            value_fn=self.evaluator.value_fn if use_value_fn else None,
+            policy_fn=self.evaluator.policy_fn,
             c_puct=c_puct,
+            evaluator=self.evaluator,
         )
 
     @classmethod
@@ -281,70 +547,3 @@ class MCTSGNNAgent:
         root = self.mcts.make_root(game_state)
         self.mcts.run(root, self.simulation_budget)
         return self.mcts.best_action(root, agent_id)
-
-    # ------------------------------------------------------------------
-    # Neural hooks bound to DuctMCTS
-    # ------------------------------------------------------------------
-
-    def _build_value_fn(self, simulator: RiskSimulator):
-        """Closure returning V(state) from agent_id's perspective.
-
-        `DuctMCTS._rollout` always calls this for 'agent_0' and negates for
-        'agent_1' (zero-sum). Because obs is agent-relative and the GNN was
-        trained via self-play, the raw value output is already in the
-        observing agent's frame — no sign flip needed on our side.
-        """
-        policy = self.policy
-        map_config = self.map_config
-        device = self.device
-        max_regions = self.max_regions
-
-        def value_fn(game_state: dict, agent_id: str) -> float:
-            obs = simulator.state_to_obs(game_state, agent_id)
-            graph = env_to_graph(obs, map_config, device, max_regions=max_regions)
-            batched = Batch.from_data_list([graph])
-            with torch.no_grad():
-                _, values, _ = policy(batched)
-            return float(values.squeeze().item())
-
-        return value_fn
-
-    def _build_policy_fn(self, simulator: RiskSimulator):
-        """Closure returning log P(action | state, agent) under the GNN.
-
-        Assumes `action_dict['num_actions'] == self.action_budget` (the GNN
-        always emits exactly `action_budget` slots). Fails loudly otherwise
-        rather than silently misaligning shapes.
-        """
-        policy = self.policy
-        decoder = self.decoder
-        map_config = self.map_config
-        device = self.device
-        action_budget = self.action_budget
-        max_regions = self.max_regions
-
-        def policy_fn(game_state: dict, agent_id: str, action_dict: dict) -> float:
-            num_actions = int(action_dict['num_actions'])
-            if num_actions != action_budget:
-                raise ValueError(
-                    f"policy_fn expects num_actions == action_budget ({action_budget}), "
-                    f"got {num_actions}. This adapter only supports GNN-emitted actions."
-                )
-            obs = simulator.state_to_obs(game_state, agent_id)
-            graph = env_to_graph(obs, map_config, device, max_regions=max_regions)
-            batched = Batch.from_data_list([graph])
-            actions_tensor = torch.as_tensor(
-                action_dict['actions'][:action_budget], dtype=torch.long, device=device
-            ).unsqueeze(0)  # [1, action_budget, 3]
-
-            with torch.no_grad():
-                action_logits, _, _ = policy(batched)
-                log_probs = decoder.compute_log_probs(
-                    action_logits,
-                    actions_tensor,
-                    batched.batch,
-                    observations=[graph],
-                )
-            return float(log_probs.sum().item())
-
-        return policy_fn

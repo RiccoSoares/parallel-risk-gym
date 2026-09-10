@@ -283,6 +283,7 @@ class DuctMCTS:
         value_fn=None,
         policy_fn=None,
         c_puct: float = 1.4,
+        evaluator=None,
     ):
         self.sim = simulator
         self.samplers = {'agent_0': action_sampler_0, 'agent_1': action_sampler_1}
@@ -299,6 +300,11 @@ class DuctMCTS:
         # When None, selection uses vanilla UCT (unchanged behaviour).
         self.policy_fn = policy_fn
         self.c_puct = c_puct
+        # Optional object owning value_fn/policy_fn state that must not
+        # outlive a search (a per-search cache of network outputs, see
+        # `parallel_risk.agents.mcts_gnn_agent.GNNEvaluator`). Its
+        # `new_search()` is called at the start of `make_root`.
+        self.evaluator = evaluator
 
     def _add_sampled_action(self, node: DuctNode, agent_id: str) -> bool:
         """Sample one action for `agent_id` at `node` and register it.
@@ -327,7 +333,14 @@ class DuctMCTS:
         return True
 
     def make_root(self, game_state: dict) -> DuctNode:
-        """Create root node from current game state."""
+        """Create root node from current game state.
+
+        Every search starts here (get_action and the self-play loops call it
+        directly), so this is where the evaluator, if any, is told a new
+        search begins.
+        """
+        if self.evaluator is not None:
+            self.evaluator.new_search()
         state = RiskSimulator.clone_state(game_state)
         _, done = self.sim._check_terminal(state)
         node = DuctNode(
