@@ -304,6 +304,77 @@ Branch: `perf/parallel-gpu`; `mcts_gnn_selfplay` and `main` untouched.
 
 ---
 
+## 9. ExIt at MCTS budget 200, K=10 — warm start vs cold start
+
+**Setup.** The experiment §2 and §3 could not afford: Expert Iteration on
+all 21 maps at `simulation_budget=200`, `action_budget=10`,
+`max_turns=40`, 50 iterations of 96 self-play games on 12 workers (16
+games per worker in lockstep), eval every 10 iterations against
+MCTS-uniform at the *same* budget, 12 games per map. Run twice — warm
+start from the K=10 PPO checkpoint, and cold start from random init.
+3.7 h and 3.5 h respectively on the optimized branch; at the old
+self-play rate of 9.0 s/game each would have taken ~13 h.
+
+**Reading the metric.** 7 of the 21 maps draw all 12 eval games at every
+point (bipartite_20, the three corridors, dual_hub_20, grid_30,
+hub_ring_30) and sit at exactly 0.50 forever, so the 21-map mean is
+diluted. The numbers below are over the **14 informative maps**. With 12
+games per map the per-map SE is ~0.14 and the SE of the 14-map mean is
+~0.037.
+
+| | first eval (iter 10) | last eval (iter 50) | change |
+|---|---|---|---|
+| warm start | 0.351 | 0.390 | +0.039 (~1.0 SE) |
+| cold start | 0.179 | 0.274 | **+0.095 (~2.6 SE)** |
+
+Self-play draw fraction over the last 10 iterations: warm 0.455, cold
+0.449. Figure: `experiments/exit_b200_k10/warm_vs_cold.png`.
+
+**What it changes.**
+
+1. **§2 is overturned: cold start IS viable at budget 200 / K=10.** That
+   entry concluded cold-start AZ/ExIt "is not viable on our 9-map roster
+   at K=5, budget=40, max_turns=40" because self-play produced ~100%
+   draws and the advantage signal vanished. At budget 200 with K=10,
+   cold-start self-play draws only ~45% of its games and the policy
+   improves by 2.6 SE. The collapse was an artifact of the search budget
+   and action budget, not a property of the game. This answers the
+   roadmap's open item "cold-start bootstrap via higher MCTS budget
+   (200+) — the honest test of whether AZ/ExIt can escape cold-start at
+   feasible compute": **yes, it escapes.**
+
+2. **But Tier-1 §1.1 (budget 40 → 200) does not buy same-budget parity.**
+   The warm-start run gained only ~1 SE and ends at 0.390, still well
+   below the 0.50 that would mean matching MCTS-uniform at equal budget.
+   §3 saw the same shape at budget 40 / K=5: rises modestly, plateaus
+   under 50%. Raising the budget 5x and K 2x reproduced it. Search
+   budget was not the bottleneck, so the remaining Tier-1 candidates
+   (TransformerConv/GATv2 backbone, attention pooling) or the evaluation
+   framing (compute-efficiency: MCTS+GNN at budget B vs MCTS-uniform at
+   4B) are the honest next moves, not more search.
+
+3. **Cold start improves more than warm start** (+0.095 vs +0.039) while
+   ending lower (0.274 vs 0.390). Consistent with the warm-started
+   policy already sitting near this method's ceiling, so ExIt has little
+   left to extract, while the random-init policy has room and ExIt does
+   move it. Neither approaches parity.
+
+4. **`max_turns=40` wastes a third of the roster.** 7 maps carry no
+   signal at all. Either raise `max_turns` for the large maps or drop
+   them from this comparison; the earlier decision to defer `max_turns`
+   100 should be revisited before the next ExIt run.
+
+**Caveats.** One seed per arm. Per-map changes are mostly inside noise;
+only the cold-start aggregate clears 2 SE. The eval opponent is
+MCTS-uniform at the same budget, which Q3/Q4 (§6, §7) showed is a strong
+reference at K=10.
+
+Scripts: `experiments/mcts_gnn_exit_training_run.py`,
+`experiments/plot_exit_warm_vs_cold.py`.
+Results: `experiments/exit_b200_k10/`, `experiments/exit_b200_k10_cold/`.
+
+---
+
 ## Open threads (nothing running now)
 
 - **K=15 / K=20 K-sweep completion** — ~7h combined wall-clock.
