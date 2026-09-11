@@ -371,7 +371,8 @@ def play_eval_games_lockstep(policy, specs: Sequence[Tuple[str, int, str]], max_
                              action_budget: int, mcts_budget: int, max_regions: int,
                              games_per_batch: int = 16, device='cpu',
                              single_graph_forwards: bool = False,
-                             stats: Dict[str, float] = None) -> List[Dict[str, Any]]:
+                             stats: Dict[str, float] = None,
+                             pw_sampler: str = 'masked_random') -> List[Dict[str, Any]]:
     """Play MCTS+GNN vs MCTS-uniform games in lockstep; one outcome dict per spec, in order.
 
     policy: CPU GCNPolicy; the batched forwards use a copy on `device`.
@@ -391,7 +392,8 @@ def play_eval_games_lockstep(policy, specs: Sequence[Tuple[str, int, str]], max_
         gnn_agent = MCTSGNNAgent(
             policy=policy, decoder=decoder, map_config=map_config,
             simulation_budget=mcts_budget, c_puct=1.4, action_budget=action_budget,
-            max_turns=max_turns, device='cpu', max_regions=max_regions)
+            max_turns=max_turns, device='cpu', max_regions=max_regions,
+            pw_sampler=pw_sampler)
         uniform_agent = MCTSAgent.from_env(env, simulation_budget=mcts_budget,
                                            action_budget=action_budget)
         gen = eval_episode_gen(gnn_agent, uniform_agent, env, gnn_agent_id, seed)
@@ -434,11 +436,16 @@ def eval_lockstep_worker(args):
     """Spawn-pool worker for eval games: rebuilds the policy on the CPU and plays `specs`.
 
     args: (policy_state_dict, model_kwargs, specs, max_turns, action_budget,
-           mcts_budget, max_regions, games_per_batch, device).
+           mcts_budget, max_regions, games_per_batch, device[, pw_sampler]).
     Returns the outcome dicts of `play_eval_games_lockstep`.
     """
-    (policy_state_dict, model_kwargs, specs, max_turns, action_budget,
-     mcts_budget, max_regions, games_per_batch, device) = args
+    pw_sampler = 'masked_random'
+    if len(args) == 10:
+        (policy_state_dict, model_kwargs, specs, max_turns, action_budget,
+         mcts_budget, max_regions, games_per_batch, device, pw_sampler) = args
+    else:
+        (policy_state_dict, model_kwargs, specs, max_turns, action_budget,
+         mcts_budget, max_regions, games_per_batch, device) = args
 
     torch.set_num_threads(1)
     torch.manual_seed(int(specs[0][1]) if specs else 0)
@@ -449,4 +456,4 @@ def eval_lockstep_worker(args):
     return play_eval_games_lockstep(
         policy, specs, max_turns=max_turns, action_budget=action_budget,
         mcts_budget=mcts_budget, max_regions=max_regions,
-        games_per_batch=games_per_batch, device=device)
+        games_per_batch=games_per_batch, device=device, pw_sampler=pw_sampler)

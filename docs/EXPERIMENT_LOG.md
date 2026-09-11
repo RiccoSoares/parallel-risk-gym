@@ -375,6 +375,83 @@ Results: `experiments/exit_b200_k10/`, `experiments/exit_b200_k10_cold/`.
 
 ---
 
+## 10. Why MCTS+GNN underperformed PPO: progressive widening proposed random actions
+
+**The puzzle.** §9 left ExIt at 0.390 (warm) and 0.274 (cold) against
+MCTS-uniform at the same budget, and the roadmap already recorded a PPO
+checkpoint scoring ~94% raw but only 31% when wrapped in MCTS(budget=40).
+Wrapping a good policy in search made it *worse*, at any budget.
+
+**Diagnosis.** `DuctMCTS` grows a node's action set by progressive
+widening, `visits ** pw_alpha` with `pw_alpha=0.5`, drawing each candidate
+from `pw_sampler`. The default is `masked_random`, so at budget 200 a root
+holds ~14 *uniformly random* joint actions per agent and the GNN only
+ranks that pool — it never proposes anything. At K=10 on a 20-30
+territory map the joint space is astronomically large, so the pool never
+lands near the policy's mode. Measured on 25 states per map, log-prob of
+the policy's own action minus the best of 14 random candidates:
+
+| map | advantage | random beat policy |
+|---|---|---|
+| simple_6 (6) | +0.85 nats | 10/25 states |
+| dense_12 (12) | +4.60 | 3/25 |
+| grid_20 (20) | +11.93 | 0/25 |
+| hub_ring_30 (30) | +7.89 | 2/25 |
+
+Roughly 150,000x on grid_20. The priors are *not* the problem: softmaxed
+they concentrate at 0.68-0.87 on their favourite, far from the uniform
+0.071. The GNN ranks decisively; it ranks fourteen random joint actions.
+This is the structural difference from AlphaZero, which expands children
+using the policy's own top actions.
+
+**The fix, measured without any training.** Took the same K=10 PPO
+checkpoint, played it as MCTS+GNN(budget 200) against
+MCTS-uniform(budget 200), 8 maps x 12 games, identical seeds and colours,
+changing only `pw_sampler`:
+
+| map | random | gnn | delta |
+|---|---|---|---|
+| simple_6 (6) | 0.417 | 0.667 | +0.250 |
+| medium_8 (8) | 0.625 | 0.917 | +0.292 |
+| large_10 (10) | 0.375 | **1.000** | +0.625 |
+| dense_12 (12) | 0.417 | 0.792 | +0.375 |
+| hub_spoke_16 (16) | 0.542 | 0.958 | +0.417 |
+| hex_grid_18 (18) | 0.292 | 0.708 | +0.417 |
+| grid_20 (20) | 0.500 | 0.875 | +0.375 |
+| hub_ring_30 (30) | 0.500 | 0.500 | +0.000 |
+| **mean** | **0.458** | **0.802** | **+0.344** |
+
+**What it changes.**
+
+1. **The MCTS+GNN "failure" was a configuration bug, not an algorithmic
+   limit.** With policy-proposed candidates the same weights go from
+   losing (0.458) to clearly beating MCTS-uniform at equal budget
+   (0.802). No training, no architecture change, one flag.
+2. **§9, §3 and §2 all trained and evaluated through a crippled search.**
+   Their conclusions about ExIt's ceiling, and the Tier-1 verdict in §9
+   that "search budget was not the bottleneck", describe
+   `pw_sampler='masked_random'` only. The ExIt runs need repeating with
+   `gnn` before anything is concluded about the training method.
+3. **The 94% -> 31% collapse in the roadmap is explained.**
+4. **hub_ring_30 is unaffected** because it draws all 12 games in both
+   arms at `max_turns=40` — the ceiling problem of §9 item 4, not a
+   failure of the fix. The gain on simple_6 is the smallest non-zero one
+   (+0.250), as predicted: random sampling covers a 6-territory space.
+
+**Cost.** GNN proposals need a network forward per candidate: 3.9 s per
+decision vs 0.85 s. Worth it at eval; it makes a 50-iteration ExIt run
+roughly 12 h instead of 3.7 h.
+
+**Caveats.** One checkpoint, 12 games per map (per-map SE ~0.14, but the
+mean shift of +0.344 over 8 maps is ~7 SE). `pw_sampler='gnn'` at *cold
+start* is still expected to widen poorly, since an untrained policy is
+peaked on noise — the docstring's original warning stands for that case.
+
+Scripts: `experiments/mcts_gnn_exit_training_run.py --pw-sampler`,
+scratch diagnostics in the session scratchpad.
+
+---
+
 ## Open threads (nothing running now)
 
 - **K=15 / K=20 K-sweep completion** — ~7h combined wall-clock.

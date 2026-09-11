@@ -54,7 +54,8 @@ DEFAULT_MAPS = [
 def evaluate_all_maps(policy, model_kwargs, map_names, max_turns, action_budget,
                       mcts_budget, num_games_per_map, num_workers, max_regions,
                       base_seed, games_per_batch: int = 16,
-                      device: str = 'cpu') -> Dict[str, Dict[str, float]]:
+                      device: str = 'cpu',
+                      pw_sampler: str = 'masked_random') -> Dict[str, Dict[str, float]]:
     """Evaluate MCTS+GNN(current) vs MCTS(uniform) on every map, in parallel.
 
     Each worker plays its share of the games in lockstep
@@ -82,7 +83,7 @@ def evaluate_all_maps(policy, model_kwargs, map_names, max_turns, action_budget,
     for pos, i in enumerate(order):
         chunks[pos % len(chunks)].append(specs[i])
     task_args = [(state_dict_cpu, model_kwargs, chunk, max_turns, action_budget,
-                  mcts_budget, max_regions, games_per_batch, device)
+                  mcts_budget, max_regions, games_per_batch, device, pw_sampler)
                  for chunk in chunks if chunk]
 
     outcomes = []
@@ -301,6 +302,13 @@ def main():
     parser.add_argument('--games-per-worker', type=int, default=16,
                         help='Games a worker advances in lockstep, sharing one batched '
                              'GNN forward per round. 1 = the old one-game-at-a-time worker.')
+    parser.add_argument('--pw-sampler', default='masked_random',
+                        choices=['masked_random', 'gnn'],
+                        help="Where progressive widening draws candidate actions. "
+                             "'masked_random' (default) samples uniformly from the valid "
+                             "joint space, so at K=10 on a 20+ territory map the tree never "
+                             "contains the policy's preferred action. 'gnn' draws candidates "
+                             "from the policy, AlphaZero-style. Applies to self-play AND eval.")
     parser.add_argument('--selfplay-device', default='cpu',
                         help="Where the batched self-play forwards run. Keep 'cpu': our "
                              'graphs are tiny and 12 CUDA contexts serialize on one device '
@@ -394,7 +402,7 @@ def main():
         'c_puct': 1.4, 'uct_c': 1.41, 'pw_alpha': 0.5,
         'max_rollout_turns': args.max_turns,
         'action_budget': K,
-        'pw_sampler': 'masked_random',
+        'pw_sampler': args.pw_sampler,
         'use_value_fn': args.use_value_fn,
     }
     self_play_config = {
@@ -471,6 +479,7 @@ def main():
                 num_workers=args.eval_workers,
                 max_regions=trainer.max_regions,
                 base_seed=100000 + (it + 1) * 137,
+                pw_sampler=args.pw_sampler,
             )
             eval_s = time.perf_counter() - t2
             mean_wr = float(np.mean([per_map[m]['win_rate'] for m in map_names]))
