@@ -76,10 +76,14 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Claude Code local settings
-.claude/
+# Claude Code local settings (personal) — but share team skills
+.claude/*
+!.claude/skills/
 
 # Training artifacts
 checkpoints/
 ~/ray_results/
 runs/
+
+# benchmark/run logs
+experiments/benchmarks/*.log

@@ -1,0 +1,80 @@
+# Expert Iteration (ExIt) training configuration for MCTS+GNN.
+#
+# Trains a GNN via advantage-weighted actor-critic on data collected from
+# MCTS+GNN self-play. External reward signal (game outcome) drives policy
+# updates, sidestepping the self-referential cold-start problem of the
+# AZ-distillation variant.
+#
+# Default map set: all 9 unique maps (basic_6 alias of simple_6 excluded).
+
+env:
+  map_names:
+    - simple_6
+    - medium_8
+    - large_10
+    - triangle_6
+    - ring_6
+    - star_8
+    - double_hub_8
+    - hex_grid_10
+    - dense_12
+  max_turns: 40
+  action_budget: 5
+
+model:
+  type: "gcn"
+  hidden_dim: 128
+  num_layers: 3
+  dropout: 0.1
+
+mcts:
+  simulation_budget: 40
+  c_puct: 1.4
+  uct_c: 1.41
+  pw_alpha: 0.5
+  max_rollout_turns: 20
+  # pw_sampler: where progressive widening draws candidates. 'masked_random' lets the
+  # GNN only RANK ~14 random joint actions per root at budget 200, which at K=10 on
+  # 20+ territory maps never contains the policy's preferred action. Switching to 'gnn'
+  # (policy proposes its own children, AlphaZero-style) moved the same checkpoint from
+  # 0.458 to 0.802 against MCTS-uniform(200) with no training. See EXPERIMENT_LOG.md 10.
+  # Costs a forward per candidate (3.9 s/decision vs 0.85 s). Prefer 'gnn' when warm
+  # starting; 'masked_random' only makes sense from random init.
+  pw_sampler: masked_random
+
+self_play:
+  num_games_per_iteration: 72   # ~8 games per map (uniform sampling across 9 maps)
+  num_workers: 12               # spawn processes; each plays num_games_per_iteration // num_workers games
+  games_per_worker: 16          # games a worker keeps in flight (lockstep: one batched GNN forward per
+                                # round serves all of them); 1 = the original one-game-at-a-time CPU worker
+  device: cpu                   # where the lockstep workers' batched forwards run: cpu | cuda | auto.
+                                # KEEP cpu: measured 12 workers x 16 games, 24 games, budget 200 ->
+                                # 2.93 s/game on cpu vs 12.08 s/game on cuda. Our graphs are tiny
+                                # (6-30 nodes, hidden 128) so a batch-23 forward is a few ms on one
+                                # core, while 12 processes' CUDA contexts serialize on one device at
+                                # ~4.5 ms of fixed latency each. cuda only makes sense with few
+                                # processes and far larger batches, which starves the (python-bound)
+                                # tree search of cores. Search bookkeeping always runs on the CPU.
+  dirichlet_alpha: 0.3
+  noise_frac: 0.25
+  dirichlet_min_actions: 8      # widen root to >=8 actions before Dirichlet
+  temperature_turns: 10
+  max_temperature: 1.0
+
+trainer:
+  num_epochs: 4                 # SGD passes per iteration over collected data
+  learning_rate: 1.0e-4
+  # After per-batch advantage normalization (unit variance), policy_loss and
+  # value_loss are on comparable scales, so no bump needed.
+  value_loss_coeff: 1.0
+  entropy_coeff: 0.005          # small bonus to keep exploration alive at cold-start
+  max_grad_norm: 0.5
+  use_gpu: true                 # trainer update on GPU; self-play workers on CPU
+
+outer:
+  num_iterations: 50
+  checkpoint_interval: 10
+
+logging:
+  log_dir: "runs/exit_training"
+  checkpoint_dir: "checkpoints/exit_training"

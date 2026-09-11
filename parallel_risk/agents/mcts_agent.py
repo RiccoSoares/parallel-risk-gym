@@ -27,8 +27,14 @@ def _action_to_key(action_dict: dict) -> tuple:
 
 
 def _key_to_action(key: tuple, max_actions: int = 10) -> dict:
-    """Reconstruct action dict from a hashable key."""
-    arr = np.zeros((max_actions, 3), dtype=np.int32)
+    """Reconstruct action dict from a hashable key.
+
+    The output array is sized `max(len(key), max_actions)` so keys longer
+    than the classic default of 10 (i.e. action_budget > 10) don't overflow.
+    Env consumers that expect a fixed shape can re-pad downstream.
+    """
+    size = max(len(key), max_actions)
+    arr = np.zeros((size, 3), dtype=np.int32)
     for i, (src, dst, troops) in enumerate(key):
         arr[i] = [src, dst, troops]
     return {'num_actions': len(key), 'actions': arr}
@@ -51,6 +57,9 @@ class RiskSimulator:
     def __init__(self, map_config: MapConfig, max_turns: int = 100):
         self.map_config = map_config
         self.max_turns = max_turns
+        self._agent_index = {agent: idx for idx, agent in enumerate(self.AGENTS)}
+        # (name, territories, bonus) per region, in map order
+        self._region_items = map_config.region_items
 
     @staticmethod
     def clone_state(game_state: dict) -> dict:
@@ -68,22 +77,20 @@ class RiskSimulator:
         Output is compatible with MaskedRandomAgentRLlib.get_action_raw().
         Mirrors ParallelRiskEnv._get_observation() exactly.
         """
-        agent_idx = self.AGENTS.index(agent)
-        n = self.map_config.n_territories
+        agent_idx = self._agent_index[agent]
+        ownership_array = game_state['territory_ownership']
 
         # Agent-relative ownership: +1=self, -1=enemy
-        ownership = np.where(
-            game_state['territory_ownership'] == agent_idx,
-            np.int8(1),
-            np.int8(-1),
-        ).astype(np.int8)
+        ownership = np.where(ownership_array == agent_idx, np.int8(1), np.int8(-1))
 
         # Region control
-        region_names = list(self.map_config.regions.keys())
-        region_control = np.zeros(len(region_names), dtype=np.int8)
-        for i, region_name in enumerate(region_names):
-            territories = self.map_config.regions[region_name]
-            if all(game_state['territory_ownership'][t] == agent_idx for t in territories):
+        ownership_list = ownership_array.tolist()
+        region_control = np.zeros(len(self._region_items), dtype=np.int8)
+        for i, (_region_name, territories, _bonus) in enumerate(self._region_items):
+            for territory in territories:
+                if ownership_list[territory] != agent_idx:
+                    break
+            else:
                 region_control[i] = 1
 
         return {
@@ -95,17 +102,27 @@ class RiskSimulator:
             'region_control': region_control,
         }
 
+    def _income_from(self, ownership: list, agent_idx: int, base_income: int) -> int:
+        """Base income + bonuses of the regions fully owned by agent_idx (ownership: python list)."""
+        income = base_income
+        for _region_name, territories, bonus in self._region_items:
+            for territory in territories:
+                if ownership[territory] != agent_idx:
+                    break
+            else:
+                income += bonus
+        return income
+
     def _calculate_income(self, game_state: dict, agent: str) -> int:
         """Base income + region bonuses. Mirrors env._calculate_income()."""
-        agent_idx = self.AGENTS.index(agent)
-        income = game_state['income_per_turn']
-        for region_name, territories in self.map_config.regions.items():
-            if all(game_state['territory_ownership'][t] == agent_idx for t in territories):
-                income += self.map_config.region_bonuses[region_name]
-        return income
+        return self._income_from(game_state['territory_ownership'].tolist(),
+                                 self._agent_index[agent], game_state['income_per_turn'])
 
     def step(self, game_state: dict, actions: dict) -> tuple:
         """Execute one turn deterministically. Does NOT mutate input.
+
+        Mirrors ParallelRiskEnv.step() on python-list mirrors of the state
+        arrays, with actions sorted by source instead of shuffled.
 
         Args:
             game_state: Current game state dict.
@@ -114,102 +131,100 @@ class RiskSimulator:
         Returns:
             (next_state, rewards_dict, done_bool)
         """
-        state = self.clone_state(game_state)
+        ownership_array = game_state['territory_ownership']
+        troops_array = game_state['territory_troops']
+        ownership = ownership_array.tolist()
+        troops = troops_array.tolist()
+        available_income = game_state['available_income'].copy()
+        base_income = game_state['income_per_turn']
+        agent_index = self._agent_index
 
-        # Recalculate income at turn start (mirrors env.step() lines 257-258)
+        # Recalculate income at turn start (mirrors env.step())
         for agent in self.AGENTS:
-            state['available_income'][agent] = self._calculate_income(state, agent)
+            available_income[agent] = self._income_from(ownership, agent_index[agent], base_income)
 
-        # Collect and classify actions
-        validator = ActionValidator(state, self.map_config, self.AGENTS)
+        # Collect and classify actions (validator reads the live mutating mirrors —
+        # intentional, matches env behavior: later actions see earlier updates)
+        validator = ActionValidator(
+            {'territory_ownership': ownership, 'territory_troops': troops,
+             'available_income': available_income},
+            self.map_config, self.AGENTS)
         all_actions = []
         for agent in self.AGENTS:
-            if agent not in actions:
+            if agent in actions:
+                all_actions.extend(validator.parse_actions(agent, actions[agent]))
+
+        # Sort by source for determinism (replaces random.shuffle); stable, so
+        # agent_0's rows stay ahead of agent_1's within a source
+        all_actions.sort(key=lambda action: action[1])
+
+        # Execute validated actions
+        validate = validator.validate
+        for agent, source, dest, count, action_type in all_actions:
+            agent_idx = agent_index[agent]
+            if not validate(agent_idx, source, dest, count, action_type):
                 continue
-            action_dict = actions[agent]
-            num_actions = int(action_dict['num_actions'])
-            for i in range(num_actions):
-                source, dest, troops = action_dict['actions'][i]
-                source, dest, troops = int(source), int(dest), int(troops)
-                action_type = validator.classify_action(source, dest)
-                all_actions.append({
-                    'agent': agent,
-                    'source': source,
-                    'dest': dest,
-                    'troops': troops,
-                    'type': action_type,
-                })
 
-        # Sort by source for determinism (replaces random.shuffle)
-        all_actions.sort(key=lambda a: a['source'])
+            if action_type == 'deploy':
+                troops[dest] += count
+                available_income[agent] -= count
 
-        # Execute validated actions (validator reads live mutating state — intentional,
-        # matches env behavior: later actions see updated ownership from earlier ones)
-        for action_info in all_actions:
-            if validator.validate_action(action_info):
-                self._execute_action(state, action_info)
+            elif action_type == 'transfer':
+                troops[source] -= count
+                troops[dest] += count
 
-        state['turn_number'] += 1
-        rewards, done = self._check_terminal(state)
+            else:  # attack
+                troops[source] -= count
+                defending_troops = troops[dest]
+                result, surviving_troops = CombatResolver.resolve(count, defending_troops)
+
+                if result == 'attacker_wins':
+                    ownership[dest] = agent_idx
+                    troops[dest] = surviving_troops
+                else:
+                    attacker_casualties = int(defending_troops * 0.6)
+                    troops[source] += max(0, count - attacker_casualties)
+                    troops[dest] = surviving_troops
+
+        turn_number = game_state['turn_number'] + 1
+        state = {
+            'territory_ownership': np.array(ownership, dtype=ownership_array.dtype),
+            'territory_troops': np.array(troops, dtype=troops_array.dtype),
+            'turn_number': turn_number,
+            'income_per_turn': base_income,
+            'available_income': available_income,
+        }
+        rewards, done = self._terminal_from(ownership, turn_number)
         return state, rewards, done
-
-    def _execute_action(self, state: dict, action_info: dict) -> None:
-        """Execute a single validated action in place. Mirrors env._execute_action()."""
-        agent = action_info['agent']
-        agent_idx = self.AGENTS.index(agent)
-        source = action_info['source']
-        dest = action_info['dest']
-        troops = action_info['troops']
-        action_type = action_info['type']
-
-        if action_type == 'deploy':
-            state['territory_troops'][dest] += troops
-            state['available_income'][agent] -= troops
-
-        elif action_type == 'transfer':
-            state['territory_troops'][source] -= troops
-            state['territory_troops'][dest] += troops
-
-        elif action_type == 'attack':
-            state['territory_troops'][source] -= troops
-            defending_troops = state['territory_troops'][dest]
-            result, surviving_troops = CombatResolver.resolve(troops, defending_troops)
-
-            if result == 'attacker_wins':
-                state['territory_ownership'][dest] = agent_idx
-                state['territory_troops'][dest] = surviving_troops
-            else:
-                attacker_casualties = int(defending_troops * 0.6)
-                attackers_surviving = max(0, troops - attacker_casualties)
-                state['territory_troops'][source] += attackers_surviving
-                state['territory_troops'][dest] = surviving_troops
 
     def _check_terminal(self, state: dict) -> tuple:
         """Returns (rewards_dict, done_bool). Mirrors env._check_termination()."""
-        no_rewards = {a: 0.0 for a in self.AGENTS}
+        return self._terminal_from(state['territory_ownership'].tolist(), state['turn_number'])
 
-        territory_counts = {
-            a: int(np.sum(state['territory_ownership'] == i))
-            for i, a in enumerate(self.AGENTS)
-        }
+    def _terminal_from(self, ownership: list, turn_number: int) -> tuple:
+        """_check_terminal on a python-list view of territory ownership."""
+        agents = self.AGENTS
+        no_rewards = {a: 0.0 for a in agents}
+
+        territory_counts = {a: ownership.count(i) for i, a in enumerate(agents)}
 
         # Victory: one agent owns all territories
         for agent, count in territory_counts.items():
             if count == self.map_config.n_territories:
-                rewards = {a: (1.0 if a == agent else -1.0) for a in self.AGENTS}
+                rewards = {a: (1.0 if a == agent else -1.0) for a in agents}
                 return rewards, True
 
         # Elimination: one agent has 0 territories
         eliminated = [a for a, c in territory_counts.items() if c == 0]
         if eliminated:
-            remaining = [a for a in self.AGENTS if a not in eliminated]
+            remaining = [a for a in agents if a not in eliminated]
             if len(remaining) == 1:
                 winner = remaining[0]
-                rewards = {a: (1.0 if a == winner else -1.0) for a in self.AGENTS}
+                rewards = {a: (1.0 if a == winner else -1.0) for a in agents}
                 return rewards, True
 
         # Turn limit
-        if state['turn_number'] >= self.max_turns:
+        if turn_number >= self.max_turns:
             return no_rewards, True
 
         return no_rewards, False
@@ -266,6 +281,9 @@ class DuctMCTS:
         pw_alpha: float = 0.5,
         max_rollout_turns: int = 50,
         value_fn=None,
+        policy_fn=None,
+        c_puct: float = 1.4,
+        evaluator=None,
     ):
         self.sim = simulator
         self.samplers = {'agent_0': action_sampler_0, 'agent_1': action_sampler_1}
@@ -276,9 +294,125 @@ class DuctMCTS:
         # Signature: value_fn(game_state: dict, agent_id: str) -> float
         # When None, falls back to random rollouts (default MCTS behaviour).
         self.value_fn = value_fn
+        # Optional neural policy function for PUCT-guided selection.
+        # Signature: policy_fn(game_state: dict, agent_id: str, action_dict: dict) -> float
+        # Returns the summed log-prob of the given action under the policy.
+        # When None, selection uses vanilla UCT (unchanged behaviour).
+        self.policy_fn = policy_fn
+        self.c_puct = c_puct
+        # Optional object owning value_fn/policy_fn state that must not
+        # outlive a search (a per-search cache of network outputs, see
+        # `parallel_risk.agents.mcts_gnn_agent.GNNEvaluator`). Its
+        # `new_search()` is called at the start of `make_root`.
+        self.evaluator = evaluator
 
-    def make_root(self, game_state: dict) -> DuctNode:
-        """Create root node from current game state."""
+    # ------------------------------------------------------------------
+    # Evaluation requests
+    #
+    # Every step of the search that can need a network output exists in two
+    # forms. The generator (`*_gen`) yields an evaluation request -- a list
+    # of (game_state, agent_id) pairs whose graphs the evaluator has not
+    # cached -- and continues once the caller has filled the cache. The plain
+    # method of the same name runs that generator through `drive`, which
+    # serves every request on the spot with the evaluator's single-graph
+    # forward, so it computes exactly what it always did. Existing callers
+    # use the plain methods; the lockstep driver in
+    # parallel_risk/training/mcts_gnn/lockstep.py steps the generators of
+    # many games and serves all their requests with one batched forward per
+    # round. Without an evaluator (MCTS-uniform) the generators never yield.
+    # Both forms make the same sampler calls and random draws in the same
+    # order: a request only moves a pure function of the state earlier.
+    # ------------------------------------------------------------------
+
+    def drive(self, gen):
+        """Run a search generator to completion on the synchronous path.
+
+        Each request the generator yields is served at once by
+        `self.evaluator.evaluate`, one graph at a time, so the numbers are
+        those of the unbatched search. Returns the generator's return value.
+        """
+        try:
+            request = next(gen)
+            while True:
+                if self.evaluator is None:
+                    raise RuntimeError(
+                        "the search requested a network evaluation but no evaluator is set")
+                for game_state, agent_id in request:
+                    self.evaluator.evaluate(game_state, agent_id)
+                request = gen.send(None)
+        except StopIteration as stop:
+            return stop.value
+
+    def _missing(self, game_state: dict, agent_ids) -> list:
+        """The (game_state, agent_id) pairs among `agent_ids` the evaluator has not cached."""
+        evaluator = self.evaluator
+        if evaluator is None:
+            return []
+        return [(game_state, agent_id) for agent_id in agent_ids
+                if not evaluator.has(game_state, agent_id)]
+
+    def _node_request(self, game_state: dict) -> list:
+        """Graphs a fresh non-terminal node will ask for, requested together.
+
+        Both agents' graphs when priors are needed (policy_fn set), agent_0's
+        alone when only the leaf value is (value_fn set), none otherwise. So
+        a child's value and both priors arrive in one round of a lockstep
+        driver instead of three.
+        """
+        if self.policy_fn is not None:
+            return self._missing(game_state, self.sim.AGENTS)
+        if self.value_fn is not None:
+            return self._missing(game_state, self.sim.AGENTS[:1])
+        return []
+
+    def _add_sampled_action_gen(self, node: DuctNode, agent_id: str):
+        """Sample one action for `agent_id` at `node` and register it.
+
+        Uses the agent's sampler to draw a candidate action, adds it to the
+        node's available_actions if new, and pre-seeds the stats dict with
+        the PUCT prior (when policy_fn is set) so `_puct_select` can read it
+        without an extra forward pass. When policy_fn is None, prior is 0.0
+        (exp(0)=1, harmless for the vanilla UCT branch which ignores 'p').
+
+        Yields a request for the (state, agent) graph when the prior needs a
+        forward the evaluator has not run yet. Returns True if a new action
+        was added, False if the sampler returned a duplicate. Callers rely
+        on this signal for exhaustion detection (progressive widening +
+        `apply_root_dirichlet`).
+        """
+        sampler = self.samplers[agent_id]
+        if getattr(sampler, 'wants_state', False):
+            # The sampler proposes from the same cached forward the prior
+            # below needs, so ask for the graph once, before both.
+            request = self._missing(node.game_state, (agent_id,))
+            if request:
+                yield request
+            action_dict = sampler.get_action_for_state(node.game_state, agent_id)
+        else:
+            obs = self.sim.state_to_obs(node.game_state, agent_id)
+            action_dict = sampler.get_action_raw(obs)
+        key = _action_to_key(action_dict)
+        if key in node.available_actions[agent_id]:
+            return False
+        node.available_actions[agent_id].append(key)
+        if key not in node.stats[agent_id]:
+            prior = 0.0
+            if self.policy_fn is not None:
+                request = self._missing(node.game_state, (agent_id,))
+                if request:
+                    yield request
+                prior = self.policy_fn(node.game_state, agent_id, action_dict)
+            node.stats[agent_id][key] = {'q': 0.0, 'n': 0, 'p': prior}
+        return True
+
+    def _add_sampled_action(self, node: DuctNode, agent_id: str) -> bool:
+        """Synchronous `_add_sampled_action_gen`."""
+        return self.drive(self._add_sampled_action_gen(node, agent_id))
+
+    def make_root_gen(self, game_state: dict):
+        """Generator form of `make_root`: yields the root's graph request, returns the node."""
+        if self.evaluator is not None:
+            self.evaluator.new_search()
         state = RiskSimulator.clone_state(game_state)
         _, done = self.sim._check_terminal(state)
         node = DuctNode(
@@ -292,23 +426,36 @@ class DuctMCTS:
             rewards, _ = self.sim._check_terminal(state)
             node.terminal_rewards = rewards
         else:
-            # Seed each player's action list with one sampled action
+            request = self._node_request(state)
+            if request:
+                yield request
+            # Seed each player's action list with one sampled action (+ prior)
             for agent in self.sim.AGENTS:
-                obs = self.sim.state_to_obs(state, agent)
-                key = _action_to_key(self.samplers[agent].get_action_raw(obs))
-                if key not in node.available_actions[agent]:
-                    node.available_actions[agent].append(key)
+                yield from self._add_sampled_action_gen(node, agent)
         return node
 
-    def run(self, root: DuctNode, budget: int) -> None:
-        """Execute `budget` MCTS iterations from root."""
+    def make_root(self, game_state: dict) -> DuctNode:
+        """Create root node from current game state.
+
+        Every search starts here (get_action and the self-play loops call it
+        directly), so this is where the evaluator, if any, is told a new
+        search begins.
+        """
+        return self.drive(self.make_root_gen(game_state))
+
+    def search_gen(self, root: DuctNode, budget: int):
+        """Generator form of `run`: `budget` MCTS iterations from root."""
         for _ in range(budget):
-            node, path = self._select(root)
+            node, path = yield from self._select_gen(root)
             if node.is_terminal:
                 rewards = node.terminal_rewards
             else:
-                rewards = self._rollout(node.game_state)
+                rewards = yield from self._rollout_gen(node.game_state)
             self._backprop(path, node, rewards)
+
+    def run(self, root: DuctNode, budget: int) -> None:
+        """Execute `budget` MCTS iterations from root."""
+        self.drive(self.search_gen(root, budget))
 
     def best_action(self, root: DuctNode, agent_id: str) -> dict:
         """Return most-visited action for agent_id at root."""
@@ -324,29 +471,157 @@ class DuctMCTS:
             best_key = root.available_actions[agent_id][0]
         return _key_to_action(best_key)
 
+    def policy_target(self, root: DuctNode, agent_id: str) -> dict:
+        """Normalized visit distribution over the root's available actions.
+
+        Returns {action_key: probability}. If every action has zero visits
+        (e.g. budget=0), returns a uniform distribution over available actions.
+        Distillation targets for MCTS+GNN training read from this.
+        """
+        counts = {
+            key: float(root.stats[agent_id].get(key, {}).get('n', 0))
+            for key in root.available_actions[agent_id]
+        }
+        total = sum(counts.values())
+        if total <= 0:
+            k = len(counts)
+            if k == 0:
+                return {}
+            return {key: 1.0 / k for key in counts}
+        return {key: n / total for key, n in counts.items()}
+
+    def apply_root_dirichlet(self, root: DuctNode, alpha: float = 0.3,
+                             noise_frac: float = 0.25,
+                             min_actions: int = 8, rng=None) -> None:
+        """Mix Dirichlet noise into stored per-action priors at the root.
+
+        AlphaZero-style: for each agent, ensure at least `min_actions`
+        candidates are known (calling the sampler if the seeded set is
+        smaller), then draw one `Dirichlet(alpha, k)` and mix in
+        probability space as
+            p_mixed = (1 - frac) * softmax(raw_priors) + frac * noise
+        storing `log(p_mixed)` back into `stats[agent][key]['p']`.
+
+        Softmax-normalizing the raw priors before mixing matters — otherwise
+        `exp(raw_log_prob)` on our huge joint action space is ~1e-8 and the
+        noise term dominates every key uniformly, defeating exploration.
+
+        `min_actions` guards against the degenerate case where `make_root`
+        seeded only 1 action per agent: `Dirichlet([alpha])` with k=1 always
+        samples [1.0] and injects zero noise.
+
+        No-op when `noise_frac <= 0` or when the sampler yields no candidates.
+        Accepts a numpy Generator `rng` for reproducibility; falls back to a
+        fresh default_rng() if None.
+        """
+        self.drive(self.apply_root_dirichlet_gen(root, alpha=alpha, noise_frac=noise_frac,
+                                                 min_actions=min_actions, rng=rng))
+
+    def apply_root_dirichlet_gen(self, root: DuctNode, alpha: float = 0.3,
+                                 noise_frac: float = 0.25,
+                                 min_actions: int = 8, rng=None):
+        """Generator form of `apply_root_dirichlet` (yields while widening the root)."""
+        if noise_frac <= 0.0:
+            return
+        if rng is None:
+            rng = np.random.default_rng()
+        for agent in self.sim.AGENTS:
+            # Widen the action set to at least min_actions (stop early if
+            # the sampler is stuck returning duplicates).
+            consec_dupes = 0
+            while len(root.available_actions[agent]) < min_actions:
+                if root.is_terminal:
+                    break
+                added = yield from self._add_sampled_action_gen(root, agent)
+                if not added:
+                    consec_dupes += 1
+                    if consec_dupes >= 3:
+                        break
+                else:
+                    consec_dupes = 0
+
+            keys = list(root.available_actions[agent])
+            k = len(keys)
+            if k == 0:
+                continue
+
+            # Softmax over stored raw log-priors so mixing happens in
+            # probability space with comparable magnitudes.
+            raw = [float(root.stats[agent].get(key, {}).get('p', 0.0)) for key in keys]
+            max_p = max(raw)
+            exps = [math.exp(p - max_p) for p in raw]
+            z = sum(exps) or 1.0
+            normalized = [e / z for e in exps]
+
+            noise = rng.dirichlet([alpha] * k)
+            for i, key in enumerate(keys):
+                s = root.stats[agent].get(key)
+                if s is None:
+                    root.stats[agent][key] = {'q': 0.0, 'n': 0, 'p': 0.0}
+                    s = root.stats[agent][key]
+                p_new = (1.0 - noise_frac) * normalized[i] + noise_frac * float(noise[i])
+                s['p'] = math.log(max(p_new, 1e-12))
+
+    def sampled_action(self, root: DuctNode, agent_id: str,
+                       temperature: float = 1.0) -> dict:
+        """Return an action sampled from `n^(1/T) / sum n^(1/T)`.
+
+        T <= 1e-3 falls back to `best_action` (argmax over visits) to avoid
+        numerical blowups. Standard AlphaZero-style: T=1 for early moves
+        (exploration), T~0 later (exploitation).
+        """
+        if temperature <= 1e-3:
+            return self.best_action(root, agent_id)
+        keys = list(root.available_actions[agent_id])
+        if not keys:
+            raise RuntimeError(f"No available actions at root for {agent_id}")
+        counts = np.array([
+            float(root.stats[agent_id].get(k, {}).get('n', 0))
+            for k in keys
+        ])
+        if counts.sum() <= 0:
+            # No visits yet: uniform sample.
+            probs = np.ones(len(keys)) / len(keys)
+        else:
+            scaled = counts ** (1.0 / temperature)
+            probs = scaled / scaled.sum()
+        idx = int(np.random.choice(len(keys), p=probs))
+        return _key_to_action(keys[idx])
+
     def _select(self, root: DuctNode) -> tuple:
+        """Synchronous `_select_gen`."""
+        return self.drive(self._select_gen(root))
+
+    def _select_gen(self, root: DuctNode):
         """Traverse tree using UCT. Returns (leaf_node, path).
 
-        path entries are (node, a0_key, a1_key).
+        path entries are (node, a0_key, a1_key). Yields the requests of
+        progressive widening and, at expansion, the child's graphs (both
+        agents together) before the child's actions are seeded.
         """
         node = root
         path = []
 
         while not node.is_terminal and node.visit_count > 0:
-            # Progressive widening: grow each player's action set if needed
+            # Progressive widening: grow each player's action set if needed.
+            # Guard against sampler exhaustion by counting consecutive duplicates.
             for agent in self.sim.AGENTS:
+                consec_dupes = 0
                 attempts = 0
                 while node.visit_count ** self.pw_alpha > len(node.available_actions[agent]):
-                    obs = self.sim.state_to_obs(node.game_state, agent)
-                    key = _action_to_key(self.samplers[agent].get_action_raw(obs))
-                    if key not in node.available_actions[agent]:
-                        node.available_actions[agent].append(key)
+                    added = yield from self._add_sampled_action_gen(node, agent)
+                    if added:
+                        consec_dupes = 0
+                    else:
+                        consec_dupes += 1
+                        if consec_dupes >= 3:
+                            break  # sampler stuck: give up widening at this node
                     attempts += 1
-                    if attempts > 10:  # guard against exhausted action space
+                    if attempts > 20:
                         break
 
-            a0 = self._uct_select(node, 'agent_0')
-            a1 = self._uct_select(node, 'agent_1')
+            a0 = self._select_action(node, 'agent_0')
+            a1 = self._select_action(node, 'agent_1')
             joint_key = (a0, a1)
             path.append((node, a0, a1))
 
@@ -365,17 +640,23 @@ class DuctMCTS:
                     terminal_rewards=rewards if done else None,
                 )
                 if not done:
+                    request = self._node_request(next_state)
+                    if request:
+                        yield request
                     for agent in self.sim.AGENTS:
-                        obs = self.sim.state_to_obs(next_state, agent)
-                        key = _action_to_key(self.samplers[agent].get_action_raw(obs))
-                        if key not in child.available_actions[agent]:
-                            child.available_actions[agent].append(key)
+                        yield from self._add_sampled_action_gen(child, agent)
                 node.children[joint_key] = child
                 return child, path
 
             node = node.children[joint_key]
 
         return node, path
+
+    def _select_action(self, node: DuctNode, agent_id: str) -> tuple:
+        """Dispatch to PUCT when a policy_fn is set, otherwise vanilla UCT."""
+        if self.policy_fn is None:
+            return self._uct_select(node, agent_id)
+        return self._puct_select(node, agent_id)
 
     def _uct_select(self, node: DuctNode, agent_id: str) -> tuple:
         """Select action for one player using UCT formula."""
@@ -394,13 +675,60 @@ class DuctMCTS:
 
         return best_key
 
+    def _puct_select(self, node: DuctNode, agent_id: str) -> tuple:
+        """PUCT selection: Q + c_puct * P * sqrt(N_parent) / (1 + n).
+
+        Priors P are softmax-normalized across the currently-known action
+        set at this node so they sum to 1 (standard AlphaZero behavior).
+        Without this normalization, `exp(raw_log_prob)` on a large joint
+        action space (~e^-18 for ours) makes the prior term ~1e-8 —
+        eight orders of magnitude smaller than Q — and PUCT collapses to
+        pure Q-argmax. The stored `s['p']` is still the raw log-prior
+        from `policy_fn`; softmax happens here at read time.
+
+        Unvisited actions are returned immediately (same fallback as
+        `_uct_select`) so priors don't starve exploration.
+        """
+        keys = node.available_actions[agent_id]
+        if not keys:
+            raise RuntimeError(f"_puct_select: no available actions for {agent_id}")
+
+        raw = [float(node.stats[agent_id].get(k, {}).get('p', 0.0)) for k in keys]
+        max_p = max(raw)
+        exps = [math.exp(p - max_p) for p in raw]  # log-sum-exp for stability
+        z = sum(exps) or 1.0
+        priors = [e / z for e in exps]
+
+        sqrt_N = math.sqrt(max(node.visit_count, 1))
+        best_key = None
+        best_score = -math.inf
+
+        for key, p in zip(keys, priors):
+            s = node.stats[agent_id].get(key)
+            if s is None or s['n'] == 0:
+                return key
+            score = s['q'] + self.c_puct * p * sqrt_N / (1 + s['n'])
+            if score > best_score:
+                best_score = score
+                best_key = key
+
+        return best_key
+
     def _rollout(self, game_state: dict) -> dict:
+        """Synchronous `_rollout_gen`."""
+        return self.drive(self._rollout_gen(game_state))
+
+    def _rollout_gen(self, game_state: dict):
         """Evaluate a leaf node.
 
         If a value_fn was provided (AlphaZero mode), calls it for a direct
-        neural estimate.  Otherwise runs a random playout (standard MCTS).
+        neural estimate (yielding the leaf's graph request first when it is
+        not cached). Otherwise runs a random playout (standard MCTS).
         """
         if self.value_fn is not None:
+            request = self._missing(game_state, self.sim.AGENTS[:1])
+            if request:
+                yield request
             v = self.value_fn(game_state, 'agent_0')
             return {'agent_0': v, 'agent_1': -v}
 
@@ -426,7 +754,7 @@ class DuctMCTS:
             for agent, key in [('agent_0', a0), ('agent_1', a1)]:
                 r = rewards[agent]
                 if key not in node.stats[agent]:
-                    node.stats[agent][key] = {'q': 0.0, 'n': 0}
+                    node.stats[agent][key] = {'q': 0.0, 'n': 0, 'p': 0.0}
                 s = node.stats[agent][key]
                 s['n'] += 1
                 s['q'] += (r - s['q']) / s['n']  # incremental mean

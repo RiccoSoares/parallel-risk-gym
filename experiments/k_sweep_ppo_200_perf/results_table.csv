@@ -1,0 +1,25 @@
+map,n_territories,bucket,K5,K10
+ring_6,6,small (6-12),100.0,93.3
+simple_6,6,small (6-12),60.0,46.7
+triangle_6,6,small (6-12),60.0,26.7
+double_hub_8,8,small (6-12),100.0,86.7
+medium_8,8,small (6-12),100.0,100.0
+star_8,8,small (6-12),86.7,100.0
+hex_grid_10,10,small (6-12),93.3,66.7
+large_10,10,small (6-12),100.0,93.3
+dense_12,12,small (6-12),93.3,93.3
+dense_mesh_16,16,medium (16-22),93.3,86.7
+hub_spoke_16,16,medium (16-22),100.0,100.0
+hex_grid_18,18,medium (16-22),93.3,53.3
+ring_cross_18,18,medium (16-22),86.7,80.0
+bipartite_20,20,medium (16-22),86.7,80.0
+corridor_20,20,medium (16-22),100.0,13.3
+dual_hub_20,20,medium (16-22),100.0,86.7
+grid_20,20,medium (16-22),100.0,66.7
+corridor_22,22,medium (16-22),100.0,26.7
+corridor_28,28,large (28-30),100.0,0.0
+grid_30,30,large (28-30),100.0,40.0
+hub_ring_30,30,large (28-30),93.3,20.0
+MEAN_small (6-12),,small (6-12),88.1,78.5
+MEAN_medium (16-22),,medium (16-22),95.6,65.9
+MEAN_large (28-30),,large (28-30),97.8,20.0

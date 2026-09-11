@@ -1,0 +1,80 @@
+{
+  "label": "wave1",
+  "timestamp": "2026-09-10T04:56:34.777053",
+  "git": {
+    "commit": "308cd40",
+    "branch": "perf/parallel-gpu",
+    "dirty": true
+  },
+  "full": false,
+  "threads": 4,
+  "ckpt": "C:\\Users\\ricco\\Documents\\GitHub\\parallel-risk-gym\\experiments\\k_sweep_ppo_200\\K10\\checkpoints\\final.pt",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "torch": "2.11.0+cu128",
+  "cuda": true,
+  "gpu": "NVIDIA GeForce RTX 5080",
+  "results": {
+    "env_step": {
+      "simple_6/ms_per_step": 0.09540633332411139,
+      "grid_20/ms_per_step": 0.09718633332037523,
+      "hub_ring_30/ms_per_step": 0.09658033333835192
+    },
+    "sim_step": {
+      "simple_6/ms_per_turn": 0.08968166667424764,
+      "grid_20/ms_per_turn": 0.09204299999206948,
+      "hub_ring_30/ms_per_turn": 0.0915519999883448
+    },
+    "mcts_uniform": {
+      "simple_6/open/s_per_decision": 0.30834930000128224,
+      "simple_6/mid/s_per_decision": 0.06450560000666883,
+      "dense_12/open/s_per_decision": 0.7102075000002515,
+      "dense_12/mid/s_per_decision": 0.544372199998179,
+      "grid_20/open/s_per_decision": 0.7285441999993054,
+      "grid_20/mid/s_per_decision": 0.5424095999987912,
+      "hub_ring_30/open/s_per_decision": 0.7359078000008594,
+      "hub_ring_30/mid/s_per_decision": 0.5461298000009265
+    },
+    "mcts_gnn_cpu": {
+      "simple_6/open/s_per_decision": 0.7087357000054908,
+      "simple_6/mid/s_per_decision": 0.429420399996161,
+      "dense_12/open/s_per_decision": 0.7566624000028241,
+      "dense_12/mid/s_per_decision": 0.751222199993208,
+      "grid_20/open/s_per_decision": 0.839975199996843,
+      "grid_20/mid/s_per_decision": 0.7793385999975726,
+      "hub_ring_30/open/s_per_decision": 0.7872590000042692,
+      "hub_ring_30/mid/s_per_decision": 0.8780598000012105
+    },
+    "mcts_gnn_gpu": {
+      "simple_6/open/s_per_decision": 3.013544000001275,
+      "simple_6/mid/s_per_decision": 1.2459434999982477,
+      "dense_12/open/s_per_decision": 2.7243247000005795,
+      "dense_12/mid/s_per_decision": 2.8900915999984136,
+      "grid_20/open/s_per_decision": 2.9188844000018435,
+      "grid_20/mid/s_per_decision": 3.074317799997516,
+      "hub_ring_30/open/s_per_decision": 3.0662054999993416,
+      "hub_ring_30/mid/s_per_decision": 2.705294400002458
+    },
+    "ppo": {
+      "multimap_cpu_w1/rollout_s": 0.27156786666455446,
+      "multimap_cpu_w1/update_s": 0.6656860666674523,
+      "multimap_cpu_w1/iter_s": 0.9372539333320068,
+      "multimap_gpu_w4/rollout_s": 0.09132379999937257,
+      "multimap_gpu_w4/update_s": 0.3141104666695658,
+      "multimap_gpu_w4/iter_s": 0.4054342666689384,
+      "ksweep_cpu_w8/rollout_s": 0.1390987666673027,
+      "ksweep_cpu_w8/update_s": 2.513908733332452,
+      "ksweep_cpu_w8/iter_s": 2.6530074999997546,
+      "ksweep_gpu_w8/rollout_s": 0.19137269999919226,
+      "ksweep_gpu_w8/update_s": 0.4375022333333618,
+      "ksweep_gpu_w8/iter_s": 0.6288749333325541
+    },
+    "exit_selfplay": {
+      "games12_w12_b40/wall_s": 13.823226900000009,
+      "games12_w12_b40/s_per_game": 1.1519355750000007,
+      "games12_w12_b40/examples": 908.0
+    },
+    "eval_event": {
+      "3maps_g2_b40/wall_s": 23.201841900001455
+    }
+  }
+}

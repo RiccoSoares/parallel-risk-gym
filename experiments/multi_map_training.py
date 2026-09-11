@@ -23,16 +23,21 @@ matplotlib.use('Agg')  # Non-interactive backend — safe for scripts without a 
 import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------------
-# Validated categorical palette (dataviz skill, slots 1-3, adjacent-pair safe)
-# slot 1 blue   #2a78d6   simple_6
-# slot 2 orange #eb6834   medium_8
-# slot 3 aqua   #1baf7a   large_10
+# Categorical palette: matplotlib tab10 for <=10 maps, tab20 for up to 20.
+# Sorted-name indexing keeps a map's color stable across plots and re-runs.
 # ---------------------------------------------------------------------------
-_CAT = {
-    'simple_6': '#2a78d6',
-    'medium_8': '#eb6834',
-    'large_10': '#1baf7a',
-}
+def _map_colors(map_names):
+    """Return dict {map_name: RGBA tuple} using a categorical colormap.
+
+    Colors are assigned by sorted position so a given map name always gets
+    the same color across runs and across plots in the same run.
+    """
+    names_sorted = sorted(map_names)
+    n = len(names_sorted)
+    cmap = plt.get_cmap('tab10' if n <= 10 else 'tab20')
+    return {name: cmap(i % cmap.N) for i, name in enumerate(names_sorted)}
+
+
 _SURFACE = '#fcfcfb'
 _INK_PRIMARY = '#0b0b0b'
 _INK_SECONDARY = '#52514e'
@@ -44,9 +49,39 @@ _GRIDLINE = '#e1e0d9'
 # Config helpers
 # ---------------------------------------------------------------------------
 
-def build_config(map_names, output_dir, checkpoint_dir, action_budget=5,
+def _action_budget_for_maps(map_names):
+    """Global action budget heuristic: max(5, max_n // 3).
+
+    A single scalar budget applies to every map in the training set (matches
+    how PPOTrainer is wired). The heuristic keeps small maps at the baseline
+    of 5 while giving larger maps proportionally more actions per turn so
+    strategic depth isn't capped by the budget.
+    """
+    from parallel_risk.env.map_config import MapRegistry
+    max_n = max(MapRegistry.get(name).n_territories for name in map_names)
+    return max(5, max_n // 3)
+
+
+def _parse_map_list(spec, fallback):
+    """Resolve a --train-maps / --transfer-* CLI value.
+
+    'auto' -> fallback (typically MapRegistry.list_maps() minus aliases).
+    Otherwise: comma-separated map names, whitespace tolerated.
+    """
+    if spec is None or str(spec).strip().lower() == 'auto':
+        return list(fallback)
+    return [m.strip() for m in spec.split(',') if m.strip()]
+
+
+def build_config(map_names, output_dir, checkpoint_dir, action_budget=None,
                  batch_size=4096, num_epochs=10, num_workers=1, use_gpu=True):
-    """Build a PPOTrainer-compatible config dict for the given map list."""
+    """Build a PPOTrainer-compatible config dict for the given map list.
+
+    If action_budget is None, it is resolved from the training set via
+    _action_budget_for_maps (max(5, max_n // 3)).
+    """
+    if action_budget is None:
+        action_budget = _action_budget_for_maps(map_names)
     return {
         'env': {
             'map_names': list(map_names),
@@ -84,7 +119,8 @@ def build_config(map_names, output_dir, checkpoint_dir, action_budget=5,
 # ---------------------------------------------------------------------------
 
 def evaluate_policy_vs_mcts(policy, action_decoder, map_name, action_budget,
-                            num_episodes, mcts_budget=50, seed_offset=0):
+                            num_episodes, mcts_budget=50, seed_offset=0,
+                            max_regions=None):
     """
     Evaluate a GNN policy (agent_0) vs an MCTS opponent (agent_1) on one map.
 
@@ -94,6 +130,12 @@ def evaluate_policy_vs_mcts(policy, action_decoder, map_name, action_budget,
 
     Policy is set to eval() mode on entry; caller should switch it back to
     train() if training will continue.
+
+    Args:
+        max_regions: Pad the region features to this width when building the
+            observation graph. Must match the padding used at training time
+            (otherwise the policy's input dim won't match the eval features).
+            Inferred from policy.node_features_dim when None.
 
     Returns:
         dict with win_rate, wins, losses, draws, total_episodes, avg_episode_length
@@ -105,12 +147,18 @@ def evaluate_policy_vs_mcts(policy, action_decoder, map_name, action_budget,
 
     device = torch.device('cpu')
     env = ParallelRiskEnv(map_name=map_name, max_turns=50, seed=None,
-                          reward_shaping_config=None)
+                          reward_shaping_config=None,
+                          max_actions_per_turn=max(10, action_budget))
     # Create MCTS once — it is map-specific (holds map_config internally)
     mcts_agent = MCTSAgent.from_env(env, simulation_budget=mcts_budget,
                                     action_budget=action_budget)
 
     policy.eval()
+
+    # Infer max_regions from the trained model when not passed explicitly.
+    # env_to_graph emits (3 + max_regions) node features, so recover it.
+    if max_regions is None:
+        max_regions = int(policy.node_features_dim) - 3
 
     wins = losses = draws = 0
     episode_lengths = []
@@ -124,7 +172,8 @@ def evaluate_policy_vs_mcts(policy, action_decoder, map_name, action_budget,
             actions = {}
 
             if 'agent_0' in obs:
-                graph = env_to_graph(obs['agent_0'], env.map_config, device)
+                graph = env_to_graph(obs['agent_0'], env.map_config, device,
+                                     max_regions=max_regions)
                 with torch.no_grad():
                     batched = Batch.from_data_list([graph])
                     action_logits, _, _ = policy(batched)
@@ -134,11 +183,15 @@ def evaluate_policy_vs_mcts(policy, action_decoder, map_name, action_budget,
                         observations=[graph],
                     )
                 action_array = actions_tensor[0].cpu().numpy()
+                # Env-side padding target: default max(10, action_budget)
+                # matches the env's default max_actions_per_turn while scaling
+                # up for K > 10.
+                env_max_actions = max(10, action_budget)
                 actions['agent_0'] = {
                     'num_actions': action_budget,
                     'actions': np.vstack([
                         action_array,
-                        np.zeros((10 - action_budget, 3)),
+                        np.zeros((env_max_actions - action_budget, 3)),
                     ]),
                 }
 
@@ -247,7 +300,7 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
                     label='', verbose=True, batch_size=4096, num_epochs=10,
                     save_weights_path=None, mcts_budget=50,
                     num_workers=1, use_gpu=True, parallel_eval=True,
-                    save_intermediate=True):
+                    save_intermediate=True, action_budget=None):
     """
     Train a multi-map (or single-map) GNN with per-map evaluation at regular
     intervals.  Manages the PPO loop directly so evaluation happens in-memory
@@ -272,6 +325,7 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
         map_names=map_names_to_train,
         output_dir=output_dir,
         checkpoint_dir=checkpoint_dir,
+        action_budget=action_budget,
         batch_size=batch_size,
         num_epochs=num_epochs,
         num_workers=num_workers,
@@ -294,13 +348,15 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
 
     log_every = max(1, num_iterations // 10)
 
-    # Persistent eval executor. One worker per map so all evals run in
-    # parallel. Created lazily on first eval to avoid spawn cost when there
-    # are zero eval intervals.
+    # Persistent eval executor. Capped at 8 workers so a large map roster
+    # doesn't over-subscribe CPU (with 21 maps + 8 rollout workers alive,
+    # spawning 21 eval workers led to a hang observed in the 200-iter
+    # K-sweep). Multiple maps per worker just serialize — total wall-clock
+    # scales with map_count / min(map_count, 8).
     eval_executor = None
     if parallel_eval and len(map_names_to_train) > 1:
         eval_executor = ProcessPoolExecutor(
-            max_workers=len(map_names_to_train),
+            max_workers=min(len(map_names_to_train), 8),
             mp_context=mp.get_context('spawn'),
         )
 
@@ -393,44 +449,56 @@ def train_with_eval(map_names_to_train, num_iterations, eval_interval,
 # ---------------------------------------------------------------------------
 
 def run_transfer_test(full_trainer, num_iterations, eval_interval,
-                      num_episodes, output_dir, checkpoint_dir, verbose=True,
+                      num_episodes, output_dir, checkpoint_dir,
+                      transfer_train_maps, transfer_eval_map,
+                      verbose=True,
                       batch_size=4096, num_epochs=10, mcts_budget=50,
-                      num_workers=1, use_gpu=True, parallel_eval=True):
+                      num_workers=1, use_gpu=True, parallel_eval=True,
+                      action_budget=None):
     """
-    Train a 2-map model (simple_6 + medium_8 only) and compare zero-shot
-    performance on large_10 against the already-trained 3-map model.
+    Train a held-out model on `transfer_train_maps` (a subset of the full
+    training set that EXCLUDES `transfer_eval_map`) and compare zero-shot
+    performance on `transfer_eval_map` against the already-trained full model.
 
     Returns:
         dict:
-            '2map_on_large10' — eval result dict
-            '3map_on_large10' — eval result dict
+            f'zero_shot_on_{transfer_eval_map}' — eval result for held-out model
+            f'in_training_on_{transfer_eval_map}' — eval result for full model
     """
-    TWO_MAPS = ['simple_6', 'medium_8']
+    if transfer_eval_map in transfer_train_maps:
+        raise ValueError(
+            f"transfer_eval_map '{transfer_eval_map}' must be excluded from "
+            f"transfer_train_maps {transfer_train_maps}"
+        )
+
+    label = f"held-out model ({', '.join(transfer_train_maps)})"
 
     print(f"\n{'='*60}")
-    print("Transfer test: 2-map model vs 3-map model on large_10")
+    print(f"Transfer test: held-out model vs full model on {transfer_eval_map}")
+    print(f"  Held-out training set: {transfer_train_maps}")
     print('='*60)
 
-    two_map_ckpt_dir = Path(checkpoint_dir) / 'transfer_2map'
-    two_map_trainer, _, _ = train_with_eval(
-        map_names_to_train=TWO_MAPS,
+    held_out_ckpt_dir = Path(checkpoint_dir) / 'transfer_held_out'
+    held_out_trainer, _, _ = train_with_eval(
+        map_names_to_train=transfer_train_maps,
         num_iterations=num_iterations,
         eval_interval=eval_interval,
         num_episodes=num_episodes,
         output_dir=output_dir,
-        checkpoint_dir=two_map_ckpt_dir,
-        label='2-map model (simple_6 + medium_8)',
+        checkpoint_dir=held_out_ckpt_dir,
+        label=label,
         verbose=verbose,
         batch_size=batch_size,
         num_epochs=num_epochs,
-        save_weights_path=two_map_ckpt_dir / 'final.pt',
+        save_weights_path=held_out_ckpt_dir / 'final.pt',
         mcts_budget=mcts_budget,
         num_workers=num_workers,
         use_gpu=use_gpu,
         parallel_eval=parallel_eval,
+        action_budget=action_budget,
     )
 
-    action_budget = two_map_trainer.action_budget
+    action_budget = held_out_trainer.action_budget
 
     # evaluate_policy_vs_mcts runs on CPU; if either trainer's policy sits on
     # GPU we need to move it before calling the sequential eval helper.
@@ -440,26 +508,31 @@ def run_transfer_test(full_trainer, num_iterations, eval_interval,
         try:
             return evaluate_policy_vs_mcts(
                 trainer.policy, trainer.action_decoder,
-                'large_10', action_budget, num_episodes * 2,
+                transfer_eval_map, action_budget, num_episodes * 2,
                 mcts_budget=mcts_budget, seed_offset=seed_offset,
             )
         finally:
             trainer.policy.to(original_device)
 
-    print("\n  Evaluating 2-map model on large_10 (zero-shot) ...")
-    result_2map = _eval_cpu(two_map_trainer, seed_offset=5000)
+    print(f"\n  Evaluating held-out model on {transfer_eval_map} (zero-shot) ...")
+    result_held_out = _eval_cpu(held_out_trainer, seed_offset=5000)
 
-    print("  Evaluating 3-map model on large_10 ...")
-    result_3map = _eval_cpu(full_trainer, seed_offset=6000)
+    print(f"  Evaluating full model on {transfer_eval_map} ...")
+    result_full = _eval_cpu(full_trainer, seed_offset=6000)
     # Restore training mode (policy will not be trained further, but good practice)
     full_trainer.policy.train()
 
-    print(f"\n  2-map (zero-shot) on large_10: {result_2map['win_rate']:.2%}  "
-          f"({result_2map['wins']}W/{result_2map['losses']}L/{result_2map['draws']}D)")
-    print(f"  3-map (trained on it) on large_10: {result_3map['win_rate']:.2%}  "
-          f"({result_3map['wins']}W/{result_3map['losses']}L/{result_3map['draws']}D)")
+    print(f"\n  Held-out (zero-shot) on {transfer_eval_map}: "
+          f"{result_held_out['win_rate']:.2%}  "
+          f"({result_held_out['wins']}W/{result_held_out['losses']}L/{result_held_out['draws']}D)")
+    print(f"  Full (trained on it) on {transfer_eval_map}: "
+          f"{result_full['win_rate']:.2%}  "
+          f"({result_full['wins']}W/{result_full['losses']}L/{result_full['draws']}D)")
 
-    return {'2map_on_large10': result_2map, '3map_on_large10': result_3map}
+    return {
+        f'zero_shot_on_{transfer_eval_map}': result_held_out,
+        f'in_training_on_{transfer_eval_map}': result_full,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -479,18 +552,26 @@ def _apply_chart_chrome(ax):
 
 def plot_learning_curves(per_map_win_rates, eval_iterations, output_path):
     """
-    Line chart — 3 series (one per map), win rate over training iterations.
+    Line chart — one series per map, win rate over training iterations.
     Form: change-over-time → line chart.
-    Colors: categorical slots 1–3 (blue/orange/aqua), same entity colours as
-    final_performance chart to ensure cross-chart consistency.
+    Colors: categorical (tab10 / tab20), sorted-name-indexed so a given map
+    keeps the same color across this chart and the final-performance bar chart.
+    Figure width scales with map count; legend moves outside the axes for
+    large N to avoid overlapping data.
     """
-    fig, ax = plt.subplots(figsize=(7, 4), facecolor=_SURFACE)
+    map_names = list(per_map_win_rates.keys())
+    n = len(map_names)
+    colors = _map_colors(map_names)
+
+    fig_width = max(7, 1.0 * n + 4)
+    legend_outside = n > 6
+    fig, ax = plt.subplots(figsize=(fig_width, 4), facecolor=_SURFACE)
     ax.set_facecolor(_SURFACE)
 
     for map_name, win_rates in per_map_win_rates.items():
         if not win_rates:
             continue
-        color = _CAT.get(map_name, '#888888')
+        color = colors[map_name]
         xs = eval_iterations[:len(win_rates)]
         ys = [wr * 100 for wr in win_rates]
         ax.plot(
@@ -515,17 +596,24 @@ def plot_learning_curves(per_map_win_rates, eval_iterations, output_path):
 
     ax.set_xlabel("Training iteration", color=_INK_SECONDARY, fontsize=11)
     ax.set_ylabel("Win rate vs masked-random (%)", color=_INK_SECONDARY, fontsize=11)
-    ax.set_title("Multi-map GNN — learning curves per map",
+    ax.set_title(f"Multi-map GNN — learning curves ({n} maps)",
                  color=_INK_PRIMARY, fontsize=13, fontweight='bold', pad=10)
     ax.set_ylim(0, 108)
 
     _apply_chart_chrome(ax)
 
-    # Legend — always present for ≥ 2 series
-    ax.legend(
-        frameon=True, facecolor=_SURFACE, edgecolor=_GRIDLINE,
-        labelcolor=_INK_SECONDARY, fontsize=10, loc='lower right',
-    )
+    # Legend — inside for small N, outside for large N to avoid overlap.
+    if legend_outside:
+        ax.legend(
+            frameon=True, facecolor=_SURFACE, edgecolor=_GRIDLINE,
+            labelcolor=_INK_SECONDARY, fontsize=10,
+            loc='center left', bbox_to_anchor=(1.02, 0.5),
+        )
+    else:
+        ax.legend(
+            frameon=True, facecolor=_SURFACE, edgecolor=_GRIDLINE,
+            labelcolor=_INK_SECONDARY, fontsize=10, loc='lower right',
+        )
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches='tight', facecolor=_SURFACE)
@@ -537,15 +625,18 @@ def plot_final_performance(final_win_rates, output_path):
     """
     Bar chart — final win rate per map.
     Form: magnitude per nominal category → bar chart.
-    One series per bar; each map keeps its categorical slot colour so readers
-    can link this chart to the learning-curves chart by colour.
-    Direct value labels satisfy the relief rule (sub-3:1 fill for aqua on light).
+    One bar per map; colors match the learning-curves chart via _map_colors.
+    Direct value labels satisfy the relief rule for low-contrast fills.
+    Figure width scales with map count; x-tick labels rotate when N > 5.
     """
     maps = list(final_win_rates.keys())
+    n = len(maps)
     values = [final_win_rates[m] * 100 for m in maps]
-    colors = [_CAT.get(m, '#888888') for m in maps]
+    color_map = _map_colors(maps)
+    colors = [color_map[m] for m in maps]
 
-    fig, ax = plt.subplots(figsize=(5.5, 4), facecolor=_SURFACE)
+    fig_width = max(5.5, 0.8 * n + 2)
+    fig, ax = plt.subplots(figsize=(fig_width, 4), facecolor=_SURFACE)
     ax.set_facecolor(_SURFACE)
 
     bars = ax.bar(maps, values, color=colors, width=0.5, zorder=3)
@@ -568,10 +659,13 @@ def plot_final_performance(final_win_rates, output_path):
     ax.axhline(50, color=_INK_MUTED, linewidth=1, linestyle='--', alpha=0.55, zorder=2)
 
     ax.set_ylabel("Win rate vs masked-random (%)", color=_INK_SECONDARY, fontsize=11)
-    ax.set_title("Final 3-map GNN performance per map",
+    ax.set_title(f"Final {n}-map GNN performance per map",
                  color=_INK_PRIMARY, fontsize=13, fontweight='bold', pad=10)
     ax.set_ylim(0, 118)
     _apply_chart_chrome(ax)
+
+    if n > 5:
+        plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches='tight', facecolor=_SURFACE)
@@ -579,20 +673,33 @@ def plot_final_performance(final_win_rates, output_path):
     print(f"  Saved: {output_path}")
 
 
-def plot_transfer_comparison(transfer_results, output_path):
+def plot_transfer_comparison(transfer_results, output_path,
+                             held_out_map='large_10',
+                             zero_shot_key=None, in_training_key=None):
     """
-    Bar chart — 2-map model vs 3-map model on large_10 (transfer test).
+    Bar chart — held-out (zero-shot) model vs in-training model on the same map.
     Form: magnitude for 2 nominal categories (model identity) → bar chart.
-    Colors: slot 1 blue for 3-map (trained-on), slot 2 orange for 2-map (zero-shot).
-    Direct labels serve as the relief channel.
     """
-    labels = ['2-map model\n(zero-shot on large_10)', '3-map model\n(trained on large_10)']
-    values = [
-        transfer_results['2map_on_large10']['win_rate'] * 100,
-        transfer_results['3map_on_large10']['win_rate'] * 100,
+    zero_shot_key = zero_shot_key or f'zero_shot_on_{held_out_map}'
+    in_training_key = in_training_key or f'in_training_on_{held_out_map}'
+    # Back-compat: older transfer_results dicts used the fixed keys
+    # '2map_on_large10' / '3map_on_large10'.
+    if zero_shot_key not in transfer_results and '2map_on_large10' in transfer_results:
+        zero_shot_key = '2map_on_large10'
+    if in_training_key not in transfer_results and '3map_on_large10' in transfer_results:
+        in_training_key = '3map_on_large10'
+
+    labels = [
+        f'held-out model\n(zero-shot on {held_out_map})',
+        f'full model\n(trained on {held_out_map})',
     ]
-    # slot 2 (orange) for the zero-shot model, slot 1 (blue) for the full model
-    colors = ['#eb6834', '#2a78d6']
+    values = [
+        transfer_results[zero_shot_key]['win_rate'] * 100,
+        transfer_results[in_training_key]['win_rate'] * 100,
+    ]
+    # Distinct categorical colors, not tied to any map's identity.
+    tab_colors = _map_colors(['zero_shot', 'in_training'])
+    colors = [tab_colors['zero_shot'], tab_colors['in_training']]
 
     fig, ax = plt.subplots(figsize=(5.5, 4), facecolor=_SURFACE)
     ax.set_facecolor(_SURFACE)
@@ -613,8 +720,8 @@ def plot_transfer_comparison(transfer_results, output_path):
 
     ax.axhline(50, color=_INK_MUTED, linewidth=1, linestyle='--', alpha=0.55, zorder=2)
 
-    ax.set_ylabel("Win rate on large_10 (%)", color=_INK_SECONDARY, fontsize=11)
-    ax.set_title("Transfer test: large_10 zero-shot vs in-training",
+    ax.set_ylabel(f"Win rate on {held_out_map} (%)", color=_INK_SECONDARY, fontsize=11)
+    ax.set_title(f"Transfer test: {held_out_map} zero-shot vs in-training",
                  color=_INK_PRIMARY, fontsize=13, fontweight='bold', pad=10)
     ax.set_ylim(0, 118)
     _apply_chart_chrome(ax)
@@ -866,6 +973,27 @@ def main():
         help='Force sequential per-map evaluation (disables the '
              'ProcessPoolExecutor path). Useful for debugging.',
     )
+    parser.add_argument(
+        '--train-maps', default='auto',
+        help='Comma-separated list of maps to train on, or "auto" to use every '
+             'registered map (excluding aliases). Example: '
+             '"simple_6,medium_8,dense_12".',
+    )
+    parser.add_argument(
+        '--transfer-eval-map', default='auto',
+        help='Held-out map for the transfer test, or "auto" to use the last '
+             'entry in the resolved --train-maps list.',
+    )
+    parser.add_argument(
+        '--transfer-train-maps', default='auto',
+        help='Maps the held-out model trains on for the transfer test, or '
+             '"auto" to use --train-maps minus --transfer-eval-map.',
+    )
+    parser.add_argument(
+        '--action-budget', default='auto',
+        help='Global action budget per turn (integer) or "auto" for '
+             'max(5, max_n // 3) computed from the training set.',
+    )
     args = parser.parse_args()
 
     if args.profile:
@@ -897,6 +1025,45 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve map lists. "auto" -> every registered map except aliases.
+    from parallel_risk.env.map_config import MapRegistry
+    registered = MapRegistry.list_maps()
+    # basic_6 is an alias for simple_6; skip it so we don't double-count.
+    default_maps = [m for m in registered if m != 'basic_6']
+
+    train_maps = _parse_map_list(args.train_maps, default_maps)
+
+    if str(args.transfer_eval_map).strip().lower() == 'auto':
+        transfer_eval_map = train_maps[-1]
+    else:
+        transfer_eval_map = args.transfer_eval_map.strip()
+
+    if str(args.transfer_train_maps).strip().lower() == 'auto':
+        transfer_train_maps = [m for m in train_maps if m != transfer_eval_map]
+    else:
+        transfer_train_maps = _parse_map_list(args.transfer_train_maps, [])
+
+    # Resolve action budget from --action-budget flag (or auto).
+    if str(args.action_budget).strip().lower() == 'auto':
+        action_budget = _action_budget_for_maps(train_maps)
+    else:
+        action_budget = int(args.action_budget)
+
+    # Sanity check the transfer split.
+    if not args.skip_transfer:
+        if transfer_eval_map in transfer_train_maps:
+            parser.error(
+                f"--transfer-eval-map '{transfer_eval_map}' cannot appear in "
+                f"--transfer-train-maps {transfer_train_maps}"
+            )
+        if not transfer_train_maps:
+            parser.error(
+                "transfer test requires at least one map in "
+                "--transfer-train-maps (resolved to empty list)"
+            )
+
+    n_train = len(train_maps)
+
     print("\n" + "="*60)
     print("MULTI-MAP GNN TRAINING EXPERIMENT")
     print("="*60)
@@ -906,13 +1073,16 @@ def main():
     print(f"  Eval interval:   {eval_interval}")
     print(f"  Episodes/map:    {num_episodes}")
     print(f"  MCTS budget:     {mcts_budget}")
+    print(f"  Action budget:   {action_budget}")
     print(f"  Quick mode:      {args.quick}")
     print(f"  Skip transfer:   {args.skip_transfer}")
-
-    ALL_MAPS = ['simple_6', 'medium_8', 'large_10']
+    print(f"  Train maps ({n_train}): {train_maps}")
+    if not args.skip_transfer:
+        print(f"  Transfer eval map:  {transfer_eval_map}")
+        print(f"  Transfer train maps ({len(transfer_train_maps)}): {transfer_train_maps}")
 
     # -----------------------------------------------------------------------
-    # Phase 1: Train 3-map model and evaluate at intervals
+    # Phase 1: Train the full model on all `train_maps` and evaluate at intervals
     # -----------------------------------------------------------------------
     use_gpu = not args.cpu
     num_workers = args.num_workers
@@ -920,22 +1090,24 @@ def main():
     print(f"  Device:          {'GPU' if use_gpu else 'CPU'}   Workers: {num_workers}"
           f"   Parallel eval: {parallel_eval}")
 
+    full_ckpt_subdir = checkpoint_dir / f'all_{n_train}_maps'
     full_trainer, per_map_win_rates, eval_iterations = train_with_eval(
-        map_names_to_train=ALL_MAPS,
+        map_names_to_train=train_maps,
         num_iterations=num_iterations,
         eval_interval=eval_interval,
         num_episodes=num_episodes,
         output_dir=output_dir,
-        checkpoint_dir=checkpoint_dir / 'all_3_maps',
-        label='3-map model (simple_6 + medium_8 + large_10)',
+        checkpoint_dir=full_ckpt_subdir,
+        label=f'{n_train}-map model ({", ".join(train_maps)})',
         verbose=True,
         batch_size=batch_size,
         num_epochs=num_epochs,
-        save_weights_path=checkpoint_dir / 'all_3_maps' / 'final.pt',
+        save_weights_path=full_ckpt_subdir / 'final.pt',
         mcts_budget=mcts_budget,
         num_workers=num_workers,
         use_gpu=use_gpu,
         parallel_eval=parallel_eval,
+        action_budget=action_budget,
     )
 
     # Final evaluation on each map with more episodes for stable estimates.
@@ -943,15 +1115,15 @@ def main():
     # policy to CPU and rebuild there (avoids the GPU/CPU device mismatch
     # the direct sequential loop would hit when training ran on GPU).
     print(f"\n{'='*60}")
-    print("Final evaluation of 3-map model")
+    print(f"Final evaluation of {n_train}-map model")
     print('='*60)
     final_win_rates = {}
 
-    if parallel_eval and len(ALL_MAPS) > 1:
+    if parallel_eval and len(train_maps) > 1:
         # Reuse the parallel-eval worker (spawns CPU processes, one per map).
         state_dict_cpu, model_kwargs = _snapshot_policy_for_eval(full_trainer)
         with ProcessPoolExecutor(
-            max_workers=len(ALL_MAPS),
+            max_workers=len(train_maps),
             mp_context=mp.get_context('spawn'),
         ) as ex:
             futures = {
@@ -961,9 +1133,9 @@ def main():
                      full_trainer.action_budget, num_episodes * 2,
                      mcts_budget, idx * 2000),
                 )
-                for idx, map_name in enumerate(ALL_MAPS)
+                for idx, map_name in enumerate(train_maps)
             }
-            for map_name in ALL_MAPS:
+            for map_name in train_maps:
                 _, result = futures[map_name].result()
                 final_win_rates[map_name] = result['win_rate']
                 print(f"  {map_name}: {result['win_rate']:.2%}  "
@@ -973,7 +1145,7 @@ def main():
         original_device = full_trainer.device
         full_trainer.policy.to('cpu')
         try:
-            for idx, map_name in enumerate(ALL_MAPS):
+            for idx, map_name in enumerate(train_maps):
                 result = evaluate_policy_vs_mcts(
                     full_trainer.policy, full_trainer.action_decoder,
                     map_name, full_trainer.action_budget, num_episodes * 2,
@@ -998,7 +1170,10 @@ def main():
             'num_episodes': num_episodes,
             'mcts_budget': mcts_budget,
             'quick_mode': args.quick,
-            'maps': ALL_MAPS,
+            'maps': train_maps,
+            'action_budget': action_budget,
+            'transfer_eval_map': None if args.skip_transfer else transfer_eval_map,
+            'transfer_train_maps': None if args.skip_transfer else transfer_train_maps,
             'batch_size': batch_size,
             'num_epochs': num_epochs,
         },
@@ -1037,6 +1212,8 @@ def main():
             num_episodes=num_episodes,
             output_dir=output_dir,
             checkpoint_dir=checkpoint_dir,
+            transfer_train_maps=transfer_train_maps,
+            transfer_eval_map=transfer_eval_map,
             verbose=True,
             batch_size=batch_size,
             num_epochs=num_epochs,
@@ -1044,6 +1221,7 @@ def main():
             num_workers=num_workers,
             use_gpu=use_gpu,
             parallel_eval=parallel_eval,
+            action_budget=action_budget,
         )
         results['transfer_results'] = {
             key: {
@@ -1057,6 +1235,7 @@ def main():
         plot_transfer_comparison(
             transfer_results,
             output_dir / 'transfer_comparison.png',
+            held_out_map=transfer_eval_map,
         )
 
     # -----------------------------------------------------------------------
@@ -1065,18 +1244,20 @@ def main():
     print("\n" + "="*60)
     print("EXPERIMENT COMPLETE")
     print("="*60)
-    print("\nFinal 3-map model performance (vs MCTS):")
-    for map_name in ALL_MAPS:
+    print(f"\nFinal {n_train}-map model performance (vs MCTS):")
+    for map_name in train_maps:
         wr = final_win_rates[map_name]
         tag = "PASS (>50%)" if wr > 0.5 else "below 50%"
         print(f"  {map_name}: {wr:.2%}  [{tag}]")
 
     if not args.skip_transfer:
-        print("\nTransfer test — win rate on large_10 (vs MCTS):")
-        print(f"  2-map model (zero-shot): "
-              f"{transfer_results['2map_on_large10']['win_rate']:.2%}")
-        print(f"  3-map model (trained):   "
-              f"{transfer_results['3map_on_large10']['win_rate']:.2%}")
+        zs_key = f'zero_shot_on_{transfer_eval_map}'
+        it_key = f'in_training_on_{transfer_eval_map}'
+        print(f"\nTransfer test — win rate on {transfer_eval_map} (vs MCTS):")
+        print(f"  held-out model (zero-shot): "
+              f"{transfer_results[zs_key]['win_rate']:.2%}")
+        print(f"  full model (trained):       "
+              f"{transfer_results[it_key]['win_rate']:.2%}")
 
     print(f"\nOutputs written to {output_dir}:")
     saved = ['multi_map_results.json', 'learning_curves.png', 'final_performance.png']
@@ -1085,11 +1266,12 @@ def main():
     for fname in saved:
         print(f"  {fname}")
     print(f"\nCheckpoints written to {checkpoint_dir}:")
-    print(f"  3-map (final):        {checkpoint_dir / 'all_3_maps' / 'final.pt'}")
-    print(f"  3-map (per eval):     {checkpoint_dir / 'all_3_maps' / 'checkpoint_XXXXXX.pt'}")
+    print(f"  full ({n_train}-map, final):    {full_ckpt_subdir / 'final.pt'}")
+    print(f"  full ({n_train}-map, per eval): {full_ckpt_subdir / 'checkpoint_XXXXXX.pt'}")
     if not args.skip_transfer:
-        print(f"  2-map (final):        {checkpoint_dir / 'transfer_2map' / 'final.pt'}")
-        print(f"  2-map (per eval):     {checkpoint_dir / 'transfer_2map' / 'checkpoint_XXXXXX.pt'}")
+        held_out_dir = checkpoint_dir / 'transfer_held_out'
+        print(f"  held-out (final):    {held_out_dir / 'final.pt'}")
+        print(f"  held-out (per eval): {held_out_dir / 'checkpoint_XXXXXX.pt'}")
     print("="*60)
 
 

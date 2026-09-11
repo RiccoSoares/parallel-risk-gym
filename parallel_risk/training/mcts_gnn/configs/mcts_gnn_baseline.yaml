@@ -1,0 +1,64 @@
+# MCTS+GNN distillation training configuration
+#
+# Outer loop: self-play (MCTS with GNN priors) -> distil onto GNN -> repeat.
+# Distillation uses terminal outcome (+1/-1/0) as the value target, so
+# reward shaping is disabled.
+
+env:
+  map_names: ["simple_6"]
+  max_turns: 50
+  action_budget: 5
+
+model:
+  type: "gcn"
+  hidden_dim: 128
+  num_layers: 3
+  dropout: 0.1
+
+mcts:
+  simulation_budget: 50     # MCTS simulations per move during self-play
+  c_puct: 1.4               # PUCT exploration constant
+  uct_c: 1.41               # UCT constant (unused when policy_fn is set, but kept for reproducibility)
+  pw_alpha: 0.5             # progressive-widening exponent
+  max_rollout_turns: 20     # only used if value_fn falls back to rollout (never here)
+  # pw_sampler: where progressive widening draws candidates. 'masked_random' lets the
+  # GNN only RANK ~14 random joint actions per root at budget 200, which at K=10 on
+  # 20+ territory maps never contains the policy's preferred action. Switching to 'gnn'
+  # (policy proposes its own children, AlphaZero-style) moved the same checkpoint from
+  # 0.458 to 0.802 against MCTS-uniform(200) with no training. See EXPERIMENT_LOG.md 10.
+  # Costs a forward per candidate (3.9 s/decision vs 0.85 s). Prefer 'gnn' when warm
+  # starting; 'masked_random' only makes sense from random init.
+  pw_sampler: masked_random
+
+self_play:
+  num_games_per_iteration: 32
+  num_workers: 12           # spawn processes; each plays num_games_per_iteration // num_workers games
+  games_per_worker: 16      # games a worker keeps in flight (lockstep: one batched GNN forward per
+                            # round serves all of them); 1 = the original one-game-at-a-time CPU worker
+  device: cpu               # cpu | cuda | auto. KEEP cpu: with 12 worker processes the per-process
+                            # CUDA contexts serialize on one device and cuda measured 4x slower than
+                            # cpu on self-play (see mcts_gnn_exit.yaml for the numbers).
+  dirichlet_alpha: 0.3
+  noise_frac: 0.25
+  temperature_turns: 10     # T=max_temperature for turns [0, temperature_turns), then argmax
+  max_temperature: 1.0
+
+trainer:
+  batch_size: 4096          # informational (all examples per iteration are consumed each epoch)
+  num_epochs: 4             # SGD passes over the collected examples per iteration
+  learning_rate: 1.0e-4
+  # value_loss_coeff=5 balances value MSE (~0.5) against the joint-action
+  # cross-entropy policy loss (~18 on our large action space). At coeff=1.0
+  # value gradients are ~40x smaller than policy on the shared GCN backbone
+  # and the value head fails to learn.
+  value_loss_coeff: 5.0
+  entropy_coeff: 0.0
+  max_grad_norm: 0.5
+
+outer:
+  num_iterations: 200
+  checkpoint_interval: 10
+
+logging:
+  log_dir: "runs/mcts_gnn_training"
+  checkpoint_dir: "checkpoints/mcts_gnn_training"

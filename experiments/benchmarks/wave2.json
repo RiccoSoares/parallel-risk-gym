@@ -1,0 +1,46 @@
+{
+  "label": "wave2",
+  "timestamp": "2026-09-10T10:42:45.190782",
+  "git": {
+    "commit": "71f7e83",
+    "branch": "perf/parallel-gpu",
+    "dirty": true
+  },
+  "full": false,
+  "threads": 4,
+  "ckpt": "C:\\Users\\ricco\\Documents\\GitHub\\parallel-risk-gym\\experiments\\k_sweep_ppo_200\\K10\\checkpoints\\final.pt",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "torch": "2.11.0+cu128",
+  "cuda": true,
+  "gpu": "NVIDIA GeForce RTX 5080",
+  "results": {
+    "exit_selfplay": {
+      "games12_w12_b40/wall_s": 12.293158900007256,
+      "games12_w12_b40/s_per_game": 1.024429908333938,
+      "games12_w12_b40/examples": 904.0
+    },
+    "eval_event": {
+      "3maps_g2_b40/wall_s": 19.109729400006472
+    },
+    "mcts_gnn_cpu": {
+      "simple_6/open/s_per_decision": 0.8345720999932382,
+      "simple_6/mid/s_per_decision": 0.37937520000559743,
+      "dense_12/open/s_per_decision": 0.7887205000006361,
+      "dense_12/mid/s_per_decision": 0.7914407999924151,
+      "grid_20/open/s_per_decision": 0.8858394999988377,
+      "grid_20/mid/s_per_decision": 0.813109099995927,
+      "hub_ring_30/open/s_per_decision": 0.8538893999939319,
+      "hub_ring_30/mid/s_per_decision": 0.941780099994503
+    },
+    "mcts_gnn_gpu": {
+      "simple_6/open/s_per_decision": 2.682447500003036,
+      "simple_6/mid/s_per_decision": 1.3276775999984238,
+      "dense_12/open/s_per_decision": 2.502251300000353,
+      "dense_12/mid/s_per_decision": 3.024674500004039,
+      "grid_20/open/s_per_decision": 3.0939304000057746,
+      "grid_20/mid/s_per_decision": 2.6620018999965396,
+      "hub_ring_30/open/s_per_decision": 2.8065349999960745,
+      "hub_ring_30/mid/s_per_decision": 2.9583425999881
+    }
+  }
+}

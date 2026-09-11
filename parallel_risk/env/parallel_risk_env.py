@@ -36,10 +36,13 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
         # Initialize agents
         self.possible_agents = ["agent_0", "agent_1"]
         self.agents = self.possible_agents[:]
+        self._agent_index = {agent: idx for idx, agent in enumerate(self.possible_agents)}
 
         # Initialize map from registry
         self.map_config = MapRegistry.get(self.map_name)
         n_territories = self.map_config.n_territories
+        # (name, territories, bonus) per region, in map order: used by every region scan
+        self._region_items = self.map_config.region_items
 
         # Initialize reward shaping (None = no shaping, sparse rewards only)
         self.reward_shaper = None
@@ -111,89 +114,73 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
 
         return observations, infos
 
+    def _scan_regions(self, ownership, agent_idx):
+        """One pass over the regions for an agent.
+
+        Args:
+            ownership: territory ownership as a python list (or array) of agent indices
+            agent_idx: agent index to check
+
+        Returns:
+            (controlled_region_names, income): region names fully owned by the agent,
+            in map order, and base income plus their bonuses
+        """
+        controlled_regions = []
+        income = self.income_per_turn
+        for region_name, territories, bonus in self._region_items:
+            for territory in territories:
+                if ownership[territory] != agent_idx:
+                    break
+            else:
+                controlled_regions.append(region_name)
+                income += bonus
+        return controlled_regions, income
+
     def _get_observation(self, agent):
         """Generate observation for a specific agent"""
-        agent_idx = self.possible_agents.index(agent)
+        agent_idx = self._agent_index[agent]
+        controlled_regions, _ = self._scan_regions(
+            self.game_state['territory_ownership'].tolist(), agent_idx)
+        return self._build_observation(agent, agent_idx, controlled_regions)
+
+    def _build_observation(self, agent, agent_idx, controlled_regions):
+        """Observation dict for agent, given its controlled region names (from _scan_regions)."""
+        game_state = self.game_state
 
         # Convert ownership to agent perspective (-1: enemy, 1: self)
         ownership = np.where(
-            self.game_state['territory_ownership'] == agent_idx,
-            1,
-            -1
-        ).astype(np.int8)
+            game_state['territory_ownership'] == agent_idx,
+            np.int8(1),
+            np.int8(-1)
+        )
 
-        # Check region control (1 if agent controls region, 0 otherwise)
-        controlled_regions = self._check_region_control(agent)
-        region_control = np.zeros(len(self.map_config.regions), dtype=np.int8)
-        for i, region_name in enumerate(self.map_config.regions.keys()):
-            if region_name in controlled_regions:
-                region_control[i] = 1
+        # Region control (1 if agent controls region, 0 otherwise)
+        region_control = np.zeros(len(self._region_items), dtype=np.int8)
+        if controlled_regions:
+            for i, (region_name, _territories, _bonus) in enumerate(self._region_items):
+                if region_name in controlled_regions:
+                    region_control[i] = 1
 
         return {
             'territory_ownership': ownership,
-            'territory_troops': self.game_state['territory_troops'].copy(),
+            'territory_troops': game_state['territory_troops'].copy(),
             'adjacency_matrix': self.map_config.adjacency_matrix.copy(),
-            'available_income': np.array([self.game_state['available_income'][agent]], dtype=np.int32),
-            'turn_number': np.array([self.game_state['turn_number']], dtype=np.int32),
+            'available_income': np.array([game_state['available_income'][agent]], dtype=np.int32),
+            'turn_number': np.array([game_state['turn_number']], dtype=np.int32),
             'region_control': region_control,
         }
 
     def _check_region_control(self, agent):
         """Check which regions are fully controlled by agent"""
-        agent_idx = self.possible_agents.index(agent)
-        controlled_regions = []
-
-        for region_name, territories in self.map_config.regions.items():
-            if all(self.game_state['territory_ownership'][t] == agent_idx for t in territories):
-                controlled_regions.append(region_name)
-
+        controlled_regions, _ = self._scan_regions(
+            self.game_state['territory_ownership'].tolist(), self._agent_index[agent])
         return controlled_regions
 
     def _calculate_income(self, agent):
         """Calculate income for agent including region bonuses"""
-        base_income = self.income_per_turn
-
-        # Add region bonuses
-        controlled_regions = self._check_region_control(agent)
-        region_bonus = sum(self.map_config.region_bonuses[region] for region in controlled_regions)
-
-        return base_income + region_bonus
-
-    def _execute_action(self, action_info):
-        """Execute a validated action"""
-        agent = action_info['agent']
-        agent_idx = self.possible_agents.index(agent)
-        source = action_info['source']
-        dest = action_info['dest']
-        troops = action_info['troops']
-        action_type = action_info['type']
-
-        if action_type == 'deploy':
-            self.game_state['territory_troops'][dest] += troops
-            self.game_state['available_income'][agent] -= troops
-
-        elif action_type == 'transfer':
-            self.game_state['territory_troops'][source] -= troops
-            self.game_state['territory_troops'][dest] += troops
-
-        elif action_type == 'attack':
-            # Remove troops from source
-            self.game_state['territory_troops'][source] -= troops
-
-            # Resolve combat using CombatResolver
-            defending_troops = self.game_state['territory_troops'][dest]
-            result, surviving_troops = CombatResolver.resolve(troops, defending_troops)
-
-            if result == 'attacker_wins':
-                # Capture territory
-                self.game_state['territory_ownership'][dest] = agent_idx
-                self.game_state['territory_troops'][dest] = surviving_troops
-            else:
-                # Defender holds - return surviving attackers to source
-                attacker_casualties = int(defending_troops * 0.6)
-                attackers_surviving = max(0, troops - attacker_casualties)
-                self.game_state['territory_troops'][source] += attackers_surviving
-                self.game_state['territory_troops'][dest] = surviving_troops
+        _, income = self._scan_regions(
+            self.game_state['territory_ownership'].tolist(), self._agent_index[agent])
+        return income
 
     def _check_termination(self):
         """Check if game has ended.
@@ -208,30 +195,35 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
         in algorithms like PPO - terminated states bootstrap with 0, truncated states should
         bootstrap with V(s') since the game would continue.
         """
-        no_termination = {a: False for a in self.possible_agents}
-        no_truncation = {a: False for a in self.possible_agents}
-        no_rewards = {a: 0.0 for a in self.possible_agents}
+        return self._termination_from(self.game_state['territory_ownership'].tolist())
+
+    def _termination_from(self, ownership):
+        """_check_termination on a python-list view of territory ownership."""
+        possible_agents = self.possible_agents
+        no_termination = {a: False for a in possible_agents}
+        no_truncation = {a: False for a in possible_agents}
+        no_rewards = {a: 0.0 for a in possible_agents}
 
         # Count territories per agent
-        territory_counts = {}
-        for agent_idx, agent in enumerate(self.possible_agents):
-            count = np.sum(self.game_state['territory_ownership'] == agent_idx)
-            territory_counts[agent] = count
+        territory_counts = {
+            agent: ownership.count(agent_idx)
+            for agent_idx, agent in enumerate(possible_agents)
+        }
 
         # Check victory condition (one agent owns all) - TRUE TERMINATION
         for agent, count in territory_counts.items():
             if count == self.map_config.n_territories:
-                terminations = {a: True for a in self.possible_agents}
-                rewards = {a: (1.0 if a == agent else -1.0) for a in self.possible_agents}
+                terminations = {a: True for a in possible_agents}
+                rewards = {a: (1.0 if a == agent else -1.0) for a in possible_agents}
                 return terminations, no_truncation, rewards
 
         # Check elimination condition (one agent has 0 territories) - TRUE TERMINATION
         eliminated = [agent for agent, count in territory_counts.items() if count == 0]
         if eliminated:
-            remaining = [a for a in self.possible_agents if a not in eliminated]
+            remaining = [a for a in possible_agents if a not in eliminated]
             if len(remaining) == 1:
-                terminations = {a: True for a in self.possible_agents}
-                rewards = {a: (1.0 if a == remaining[0] else -1.0) for a in self.possible_agents}
+                terminations = {a: True for a in possible_agents}
+                rewards = {a: (1.0 if a == remaining[0] else -1.0) for a in possible_agents}
                 return terminations, no_truncation, rewards
 
         # Check turn limit - TRUNCATION (not termination!)
@@ -240,8 +232,8 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
         # - Territory loss (-0.08) punishes being captured
         # - This avoids perverse incentives where agents play defensively to avoid turn limit penalties
         if self.game_state['turn_number'] >= self.max_turns:
-            truncations = {a: True for a in self.possible_agents}
-            rewards = {a: 0.0 for a in self.possible_agents}
+            truncations = {a: True for a in possible_agents}
+            rewards = {a: 0.0 for a in possible_agents}
             return no_termination, truncations, rewards
 
         # Game continues
@@ -249,80 +241,103 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
 
     def step(self, actions):
         """Process one turn of parallel actions"""
+        game_state = self.game_state
+        agents = self.agents
+        agent_index = self._agent_index
+        available_income = game_state['available_income']
+
         # Capture pre-step state for reward shaping (conquest detection)
         if self.reward_shaper is not None:
-            self.reward_shaper.begin_step(self.game_state)
+            self.reward_shaper.begin_step(game_state)
+
+        # Python-list mirrors of the state arrays: the sequential validate/execute
+        # loop below runs on python ints and writes back to the arrays once at the end.
+        ownership = game_state['territory_ownership'].tolist()
+        troops = game_state['territory_troops'].tolist()
 
         # Calculate income for each agent based on region control
-        for agent in self.agents:
-            self.game_state['available_income'][agent] = self._calculate_income(agent)
+        for agent in agents:
+            _, available_income[agent] = self._scan_regions(ownership, agent_index[agent])
+
+        infos = {agent: {'invalid_actions': 0, 'controlled_regions': [], 'income': 0} for agent in agents}
+
+        # Create validator on the mirrored state (it sees the in-place updates below)
+        validator = ActionValidator(
+            {'territory_ownership': ownership, 'territory_troops': troops,
+             'available_income': available_income},
+            self.map_config, self.possible_agents)
 
         # Parse all actions into a flat list with agent attribution
         all_actions = []
-        infos = {agent: {'invalid_actions': 0, 'controlled_regions': [], 'income': 0} for agent in self.agents}
-
-        # Create validator
-        validator = ActionValidator(self.game_state, self.map_config, self.possible_agents)
-
-        for agent in self.agents:
-            if agent not in actions:
-                continue
-
-            action_dict = actions[agent]
-            num_actions = int(action_dict['num_actions'])
-
-            for i in range(num_actions):
-                source, dest, troops = action_dict['actions'][i]
-                source, dest, troops = int(source), int(dest), int(troops)
-
-                action_type = validator.classify_action(source, dest)
-                all_actions.append({
-                    'agent': agent,
-                    'source': source,
-                    'dest': dest,
-                    'troops': troops,
-                    'type': action_type
-                })
+        for agent in agents:
+            if agent in actions:
+                all_actions.extend(validator.parse_actions(agent, actions[agent]))
 
         # Shuffle actions randomly
         random.shuffle(all_actions)
 
         # Process actions sequentially
-        for action_info in all_actions:
-            if validator.validate_action(action_info):
-                self._execute_action(action_info)
-            else:
+        validate = validator.validate
+        for agent, source, dest, count, action_type in all_actions:
+            agent_idx = agent_index[agent]
+            if not validate(agent_idx, source, dest, count, action_type):
                 # Track invalid actions
-                infos[action_info['agent']]['invalid_actions'] += 1
+                infos[agent]['invalid_actions'] += 1
+                continue
+
+            if action_type == 'deploy':
+                troops[dest] += count
+                available_income[agent] -= count
+
+            elif action_type == 'transfer':
+                troops[source] -= count
+                troops[dest] += count
+
+            else:  # attack
+                # Remove troops from source
+                troops[source] -= count
+
+                # Resolve combat using CombatResolver
+                defending_troops = troops[dest]
+                result, surviving_troops = CombatResolver.resolve(count, defending_troops)
+
+                if result == 'attacker_wins':
+                    # Capture territory
+                    ownership[dest] = agent_idx
+                    troops[dest] = surviving_troops
+                else:
+                    # Defender holds - return surviving attackers to source
+                    attacker_casualties = int(defending_troops * 0.6)
+                    troops[source] += max(0, count - attacker_casualties)
+                    troops[dest] = surviving_troops
+
+        # Write the mirrors back into the state arrays
+        game_state['territory_ownership'][:] = ownership
+        game_state['territory_troops'][:] = troops
 
         # Increment turn counter
-        self.game_state['turn_number'] += 1
+        game_state['turn_number'] += 1
 
         # Store region control and income info AFTER actions processed
-        for agent in self.agents:
-            infos[agent]['controlled_regions'] = self._check_region_control(agent)
-            infos[agent]['income'] = self._calculate_income(agent)
+        controlled_regions = {}
+        for agent in agents:
+            controlled_regions[agent], infos[agent]['income'] = self._scan_regions(
+                ownership, agent_index[agent])
+            infos[agent]['controlled_regions'] = controlled_regions[agent]
 
         # Check termination and truncation conditions
-        terminations, truncations, terminal_rewards = self._check_termination()
+        terminations, truncations, terminal_rewards = self._termination_from(ownership)
 
         # Compute rewards (shaped + terminal)
         rewards = {agent: 0.0 for agent in self.possible_agents}
 
-        # Add shaped rewards if enabled
+        # Add shaped rewards if enabled, with the component breakdown in info for debugging
         if self.reward_shaper is not None:
-            agent_indices = {agent: self.possible_agents.index(agent) for agent in self.possible_agents}
-            shaped_rewards = self.reward_shaper.compute_step_rewards(
-                self.game_state, self.agents, agent_indices
+            shaped_rewards, reward_components = self.reward_shaper.compute_step_rewards_with_info(
+                game_state, agents, agent_index
             )
-            for agent in self.agents:
+            for agent in agents:
                 rewards[agent] += shaped_rewards[agent]
-
-            # Add reward component breakdown to info for debugging
-            reward_components = self.reward_shaper.get_reward_components_info(
-                self.game_state, self.agents, agent_indices
-            )
-            for agent in self.agents:
                 infos[agent]['reward_components'] = reward_components[agent]
 
         # Add terminal rewards (scaled if shaper is enabled)
@@ -335,8 +350,11 @@ class ParallelRiskEnv(pettingzoo.ParallelEnv):
             for agent in self.possible_agents:
                 rewards[agent] += terminal_rewards[agent]
 
-        # Generate observations for remaining agents
-        observations = {agent: self._get_observation(agent) for agent in self.agents}
+        # Generate observations for remaining agents (region control already computed above)
+        observations = {
+            agent: self._build_observation(agent, agent_index[agent], controlled_regions[agent])
+            for agent in agents
+        }
 
         # If game ended (either terminated or truncated), clear agents list
         if episode_ended:
