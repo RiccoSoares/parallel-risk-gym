@@ -65,6 +65,34 @@ class GNNActionSampler:
             else max(10, action_budget)
         )
 
+    # DuctMCTS checks this: when True it hands the sampler the game_state so
+    # candidates can come from the evaluator's cached forward (see
+    # `get_action_for_state`) instead of a fresh one per candidate.
+    wants_state = True
+
+    def attach_evaluator(self, evaluator) -> None:
+        """Serve candidates from `evaluator`'s per-search cache."""
+        self.evaluator = evaluator
+
+    def get_action_for_state(self, game_state: dict, agent_id: str) -> dict:
+        """A candidate action for (state, agent), reusing the cached forward.
+
+        Same distribution as `get_action_raw` on the matching observation —
+        the graph, the logits and the decoder masks are identical — but the
+        network forward is the one the PUCT prior already needs and the
+        decode is amortized over a batch of candidates. Falls back to the
+        per-call path when no evaluator is attached.
+        """
+        evaluator = getattr(self, 'evaluator', None)
+        if evaluator is None:
+            from parallel_risk.agents.mcts_agent import RiskSimulator
+            return self.get_action_raw(
+                RiskSimulator(self.map_config).state_to_obs(game_state, agent_id))
+        raw = evaluator.propose_action(game_state, agent_id)   # [action_budget, 3]
+        actions_array = np.zeros((self.max_actions_per_turn, 3), dtype=np.int32)
+        actions_array[:self.action_budget] = raw.astype(np.int32)
+        return {'num_actions': self.action_budget, 'actions': actions_array}
+
     def get_action_raw(self, obs: dict) -> dict:
         graph = env_to_graph(obs, self.map_config, self.device,
                              max_regions=self.max_regions)
@@ -109,7 +137,7 @@ class EvalEntry:
     """
 
     __slots__ = ('action_logits', 'batched', 'value_tensor', 'value',
-                 'slot_batched', 'slot_logits')
+                 'slot_batched', 'slot_logits', 'cand_pool')
 
     def __init__(self, action_logits, batched, value_tensor):
         self.action_logits = action_logits
@@ -118,6 +146,7 @@ class EvalEntry:
         self.value = None
         self.slot_batched = None
         self.slot_logits = None
+        self.cand_pool = None   # candidate actions drawn in batch, popped one at a time
 
 
 class GNNEvaluator:
@@ -179,7 +208,8 @@ class GNNEvaluator:
 
     def __init__(self, policy, decoder, map_config: MapConfig,
                  simulator: RiskSimulator, action_budget: int, device,
-                 max_regions: int = None, pair_agents: bool = False):
+                 max_regions: int = None, pair_agents: bool = False,
+                 cand_batch: int = 32):
         self.policy = policy
         self.decoder = decoder
         self.map_config = map_config
@@ -198,6 +228,10 @@ class GNNEvaluator:
         self._slot_batch = torch.arange(
             action_budget, dtype=torch.long, device=self.device).repeat_interleave(n)
         self._slot_edge_index = None
+        # Candidate-proposal geometry (pw_sampler='gnn'), built on first use.
+        self.cand_batch = cand_batch
+        self._cand_edge_index = None
+        self._cand_batch_vec = None
         self.new_search()
 
     def new_search(self) -> None:
@@ -396,6 +430,48 @@ class GNNEvaluator:
             'troops': torch.cat([d['troops'] for d in entry.action_logits], dim=0),
         }]
 
+    def propose_action(self, game_state: dict, agent_id: str) -> np.ndarray:
+        """One action sampled from the policy at (state, agent), as a [K, 3] array.
+
+        This is progressive widening's candidate source when
+        `pw_sampler='gnn'`. It reuses the cached forward — the same one the
+        PUCT prior needs, so proposing costs no extra network call — and
+        draws candidates in batches of `cand_batch`: the decoder's per-call
+        cost is dominated by mask construction and the K x 3 Categoricals,
+        which barely grows with batch size (measured 6.7 ms for one
+        candidate versus 8.2 ms for 32, i.e. 0.26 ms each). Candidates are
+        popped one per call so widening's duplicate detection is unchanged.
+
+        Batching changes which random numbers each draw consumes relative to
+        sampling one at a time; the distribution sampled from is identical.
+        """
+        entry = self.evaluate(game_state, agent_id)
+        if not entry.cand_pool:
+            entry.cand_pool = self._draw_candidates(entry)
+        return entry.cand_pool.pop()
+
+    def _draw_candidates(self, entry: EvalEntry) -> list:
+        """`cand_batch` actions sampled from one graph's cached logits, in one decode."""
+        B = self.cand_batch
+        n = self.map_config.n_territories
+        graph = entry.batched
+        if self._cand_edge_index is None:
+            self._cand_edge_index = torch.cat(
+                [graph.edge_index + b * n for b in range(B)], dim=1)
+            self._cand_batch_vec = torch.arange(
+                B, dtype=torch.long, device=self.device).repeat_interleave(n)
+        rep = Data(x=graph.x.repeat(B, 1), edge_index=self._cand_edge_index, num_nodes=B * n)
+        rep.global_features = graph.global_features.repeat(B, 1)
+        rep.batch = self._cand_batch_vec
+        logits = [{'source': d['source'].repeat(B),
+                   'dest': d['dest'].repeat(B),
+                   'troops': d['troops'].repeat(B, 1)} for d in entry.action_logits]
+        with torch.no_grad():
+            actions, _ = self.decoder.decode_actions(
+                logits, self._cand_batch_vec, deterministic=False,
+                return_log_probs=False, batched_obs=rep)
+        return list(actions.cpu().numpy())      # B arrays of [K, 3]
+
     def value_fn(self, game_state: dict, agent_id: str) -> float:
         """V(state) from agent_id's perspective.
 
@@ -576,6 +652,11 @@ class MCTSGNNAgent:
             max_regions=self.max_regions,
             pair_agents=pair_agents,
         )
+        # GNN proposals reuse the evaluator's cached forward (the prior needs
+        # the same one) and draw candidates in batches, so widening costs a
+        # decode slice instead of a forward + decode per candidate.
+        if pw_sampler == 'gnn':
+            sampler.attach_evaluator(self.evaluator)
 
         self.mcts = DuctMCTS(
             simulator=simulator,

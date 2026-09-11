@@ -380,8 +380,17 @@ class DuctMCTS:
         on this signal for exhaustion detection (progressive widening +
         `apply_root_dirichlet`).
         """
-        obs = self.sim.state_to_obs(node.game_state, agent_id)
-        action_dict = self.samplers[agent_id].get_action_raw(obs)
+        sampler = self.samplers[agent_id]
+        if getattr(sampler, 'wants_state', False):
+            # The sampler proposes from the same cached forward the prior
+            # below needs, so ask for the graph once, before both.
+            request = self._missing(node.game_state, (agent_id,))
+            if request:
+                yield request
+            action_dict = sampler.get_action_for_state(node.game_state, agent_id)
+        else:
+            obs = self.sim.state_to_obs(node.game_state, agent_id)
+            action_dict = sampler.get_action_raw(obs)
         key = _action_to_key(action_dict)
         if key in node.available_actions[agent_id]:
             return False
