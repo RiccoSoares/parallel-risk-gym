@@ -452,6 +452,71 @@ scratch diagnostics in the session scratchpad.
 
 ---
 
+## 11. ExIt with GNN-proposed widening — the method works
+
+**Setup.** §9's run repeated with the one flag §10 identified:
+`--pw-sampler gnn`, so progressive widening proposes from the policy
+instead of uniformly at random. Everything else identical — warm start
+from the K=10 PPO checkpoint, 21 maps, budget 200, K=10, max_turns 40,
+50 iterations of 96 self-play games on 12 workers, eval every 10
+iterations against MCTS-uniform(200) with 12 games per map. 13.8 h.
+
+**Result.** Mean score over **all 21 maps** (no map had to be excluded
+this time):
+
+| iter | all 21 | 14 informative | 7 formerly-dead | wins | draws |
+|---|---|---|---|---|---|
+| 10 | 0.786 | 0.833 | 0.690 | 64.3% | 28.6% |
+| 20 | 0.831 | 0.902 | 0.690 | 70.6% | 25.0% |
+| 30 | 0.825 | 0.854 | 0.768 | 71.4% | 22.2% |
+| **40** | **0.851** | **0.917** | 0.720 | **73.4%** | 23.4% |
+| 50 | 0.810 | 0.854 | 0.720 | 65.9% | 30.2% |
+
+Against the same configuration with random widening (§9), which after 50
+iterations reached 0.427 over 21 maps, 0.390 over the informative 14,
+**11.9% wins and 61.5% draws**. Figure:
+`experiments/exit_b200_k10_pwgnn/random_vs_gnn_widening.png`.
+
+**What it establishes.**
+
+1. **MCTS+GNN beats MCTS-uniform at equal search budget**, 0.851 at best
+   against 0.50 parity, winning 73% of games outright. That is the
+   Phase-3 success criterion the roadmap has carried unmet since the
+   beginning, and §9's conclusion that it could not be reached was an
+   artifact of the widening sampler.
+2. **Training contributes, but the search fix dominates.** The untrained
+   checkpoint with GNN widening already scored 0.802 on the 8-map A/B
+   subset; 40 iterations of ExIt take those maps to 0.885. So roughly
+   85% of the distance from 0.458 to 0.885 came from the flag and 15%
+   from training. ExIt is real but it is a refinement, not the driver.
+3. **The "dead maps" were never stalemates.** The 7 maps that drew every
+   game in every previous run reach 0.72-0.77 here, with only
+   corridor_28 still drawing all 12. §9 item 4 blamed `max_turns=40`;
+   the real cause was that neither side could pick a good action from a
+   random candidate pool. The deferred `max_turns` 100 change is *not*
+   needed for this.
+4. **Best checkpoint is iteration 40, not 50.** Iteration 50 drops to
+   0.810 with wins down to 65.9% and draws back up to 30.2%. One
+   12-game sample per map, so it may be noise, but prefer the iter-40
+   checkpoint and treat 50 iterations as past the useful point here.
+
+**What is still hard.** Five maps sit below 0.75 at the best eval and
+they form a clean cluster: the three corridors, hub_ring_30 and grid_30,
+all still drawing 7-12 of 12. Corridor topologies and 30-territory maps
+are where neither side can force a result in 40 turns. That is now a
+genuine structural property of those maps, since everything else on the
+roster became decisive.
+
+**Caveats.** One seed. 12 games per map (per-map SE ~0.14, SE of the
+21-map mean ~0.03). GNN proposals cost ~5.3x random ones on the real
+workload (~800 s per 96-game iteration vs ~180 s).
+
+Scripts: `experiments/mcts_gnn_exit_training_run.py --pw-sampler gnn`,
+`experiments/plot_exit_widening.py`.
+Results: `experiments/exit_b200_k10_pwgnn/`.
+
+---
+
 ## Open threads (nothing running now)
 
 - **K=15 / K=20 K-sweep completion** — ~7h combined wall-clock.
