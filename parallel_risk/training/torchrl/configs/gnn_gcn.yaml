@@ -14,8 +14,13 @@ model:
   dropout: 0.1
 
 training:
-  num_workers: 4           # Parallel environments (not yet implemented)
-  batch_size: 4096         # Environment steps per update (increased from 1024 for stability)
+  num_workers: 4           # Rollout worker processes (CPU); each collects batch_size / 2 / num_workers env steps
+  num_envs: 16             # Envs stepped in lockstep per rollout process: one batched policy forward per
+                           # step, samples form a [steps / num_envs, 2 * num_envs] grid (GAE per column).
+                           # Larger = faster collection but shorter per-column trajectories.
+  rollout_device: "cpu"    # "cuda": collect in the trainer process on the GPU instead of in workers
+                           # (needs use_gpu: true; use num_envs >= 64 to fill the GPU)
+  batch_size: 4096         # Samples per update (2 per env step: both agents)
   num_epochs: 10           # SGD epochs per batch
   learning_rate: 1.0e-4    # Reduced from 3e-4 for more stable updates
   gamma: 0.99              # Discount factor

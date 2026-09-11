@@ -48,96 +48,69 @@ DEFAULT_MAPS = [
 
 
 # ---------------------------------------------------------------------------
-# Per-map eval worker (module-level for ProcessPoolExecutor pickling)
+# Evaluation (lockstep batched, see parallel_risk/training/mcts_gnn/lockstep.py)
 # ---------------------------------------------------------------------------
-
-def _eval_worker(args):
-    """Play num_games games of MCTSGNNAgent vs MCTSAgent(uniform) on one map.
-
-    Alternates colors — half the games GNN plays agent_0, half agent_1.
-    Runs on CPU in a spawned subprocess.
-    """
-    (state_dict_cpu, model_kwargs, map_name, max_turns, action_budget,
-     mcts_budget, num_games, base_seed, max_regions) = args
-
-    import numpy as np
-    import torch
-    from parallel_risk import ParallelRiskEnv
-    from parallel_risk.agents.mcts_agent import MCTSAgent
-    from parallel_risk.agents.mcts_gnn_agent import MCTSGNNAgent
-    from parallel_risk.models.action_decoder import ActionDecoder
-    from parallel_risk.models.gnn_gcn import GCNPolicy
-
-    torch.set_num_threads(1)
-    np.random.seed(base_seed)
-    torch.manual_seed(base_seed)
-
-    policy = GCNPolicy(**model_kwargs)
-    policy.load_state_dict(state_dict_cpu)
-    policy.eval()
-
-    env = ParallelRiskEnv(map_name=map_name, max_turns=max_turns,
-                          reward_shaping_config=None)
-    decoder = ActionDecoder(action_budget=action_budget, max_troops=20)
-    gnn_agent = MCTSGNNAgent(
-        policy=policy, decoder=decoder, map_config=env.map_config,
-        simulation_budget=mcts_budget, c_puct=1.4, action_budget=action_budget,
-        max_turns=max_turns, device='cpu', max_regions=max_regions,
-    )
-    uniform_agent = MCTSAgent.from_env(env, simulation_budget=mcts_budget,
-                                       action_budget=action_budget)
-
-    wins = losses = draws = 0
-    for g in range(num_games):
-        gnn_plays_0 = (g % 2 == 0)
-        obs, _ = env.reset(seed=base_seed + g)
-        done = False
-        while not done:
-            actions = {}
-            for aid in ('agent_0', 'agent_1'):
-                if aid not in obs:
-                    continue
-                pick_gnn = (aid == 'agent_0') == gnn_plays_0
-                if pick_gnn:
-                    actions[aid] = gnn_agent.get_action(env.game_state, aid)
-                else:
-                    actions[aid] = uniform_agent.get_action(env.game_state, aid)
-            obs, rewards, terms, truncs, _ = env.step(actions)
-            done = terms.get('__all__', False) or truncs.get('__all__', False)
-
-        gnn_aid = 'agent_0' if gnn_plays_0 else 'agent_1'
-        opp_aid = 'agent_1' if gnn_plays_0 else 'agent_0'
-        r_g = float(rewards.get(gnn_aid, 0.0))
-        r_o = float(rewards.get(opp_aid, 0.0))
-        if r_g > r_o:
-            wins += 1
-        elif r_g < r_o:
-            losses += 1
-        else:
-            draws += 1
-
-    return map_name, {
-        'wins': wins, 'losses': losses, 'draws': draws,
-        'total': wins + losses + draws,
-        'win_rate': wins / max(wins + losses + draws, 1),
-    }
-
 
 def evaluate_all_maps(policy, model_kwargs, map_names, max_turns, action_budget,
                       mcts_budget, num_games_per_map, num_workers, max_regions,
-                      base_seed) -> Dict[str, Dict[str, float]]:
-    """Evaluate MCTS+GNN(current) vs MCTS(uniform) on every map, in parallel."""
+                      base_seed, games_per_batch: int = 16,
+                      device: str = 'cpu',
+                      pw_sampler: str = 'masked_random') -> Dict[str, Dict[str, float]]:
+    """Evaluate MCTS+GNN(current) vs MCTS(uniform) on every map, in parallel.
+
+    Each worker plays its share of the games in lockstep
+    (`parallel_risk/training/mcts_gnn/lockstep.py`): one batched GNN forward
+    per round serves all the games it holds, while the network-free
+    MCTS-uniform side runs synchronously in the same round. Games are dealt
+    to workers largest map first so the slow 30-territory games start early.
+    Game g of map i (in `map_names` order) keeps the seed
+    `base_seed + i * 1000 + g` and the colour of the per-game scheduling, so
+    the same games are played.
+
+    `games_per_batch=1` falls back to one game at a time per worker (exact
+    single-graph forwards). `device` stays 'cpu': see the measurements in
+    `parallel_risk/training/mcts_gnn/configs/mcts_gnn_exit.yaml`.
+    """
+    from parallel_risk.env.map_config import MapRegistry
+    from parallel_risk.training.mcts_gnn.lockstep import (
+        eval_lockstep_worker, eval_specs, summarize_eval_outcomes)
+
     state_dict_cpu = {k: v.detach().cpu() for k, v in policy.state_dict().items()}
-    args_per_map = [
-        (state_dict_cpu, model_kwargs, m, max_turns, action_budget,
-         mcts_budget, num_games_per_map, base_seed + i * 1000, max_regions)
-        for i, m in enumerate(map_names)
-    ]
-    ctx = mp.get_context('spawn')
+    specs = eval_specs(map_names, num_games_per_map, base_seed)
+    order = sorted(range(len(specs)),
+                   key=lambda i: -MapRegistry.get(specs[i][0]).n_territories)
+    chunks = [[] for _ in range(max(1, num_workers))]
+    for pos, i in enumerate(order):
+        chunks[pos % len(chunks)].append(specs[i])
+    task_args = [(state_dict_cpu, model_kwargs, chunk, max_turns, action_budget,
+                  mcts_budget, max_regions, games_per_batch, device, pw_sampler)
+                 for chunk in chunks if chunk]
+
+    outcomes = []
+    if len(task_args) <= 1:
+        for args in task_args:
+            outcomes.extend(eval_lockstep_worker(args))
+    else:
+        ctx = mp.get_context('spawn')
+        with ProcessPoolExecutor(max_workers=len(task_args), mp_context=ctx) as ex:
+            for res in ex.map(eval_lockstep_worker, task_args):
+                outcomes.extend(res)
+
+    counts = summarize_eval_outcomes(outcomes)
     per_map: Dict[str, Dict[str, float]] = {}
-    with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as ex:
-        for map_name, res in ex.map(_eval_worker, args_per_map):
-            per_map[map_name] = res
+    for m in map_names:
+        c = counts.get(m, {'wins': 0, 'losses': 0, 'draws': 0})
+        total = c['wins'] + c['losses'] + c['draws']
+        denom = max(total, 1)
+        per_map[m] = {
+            'wins': c['wins'], 'losses': c['losses'], 'draws': c['draws'],
+            'total': total,
+            'win_rate': c['wins'] / denom,
+            'draw_rate': c['draws'] / denom,
+            # Head-to-head score: draws count half. Used for the dashboard and
+            # aggregate metric because several maps are draw-heavy.
+            'score': (c['wins'] + 0.5 * c['draws']) / denom,
+        }
     return per_map
 
 
@@ -201,28 +174,37 @@ def plot_dashboard(metrics: Dict[str, list],
               labelcolor=_INK_SECONDARY, fontsize=10, loc='upper right')
     _chrome(ax)
 
-    # ---- Panel B: per-map eval win-rate + mean ------------------------
+    # ---- Panel B: per-map eval score + mean ---------------------------
+    # Score = (wins + 0.5*draws) / n. Draw-heavy maps sit at 50 rather
+    # than 0, so the mean draw-rate is drawn alongside to disambiguate
+    # "parity" from "nobody wins".
     ax = axes[1]
     if eval_history:
         eval_iters = [e['iteration'] for e in eval_history]
         # One line per map
         for m in map_names:
-            per_map = [e['per_map'].get(m, {}).get('win_rate', float('nan')) * 100
+            per_map = [e['per_map'].get(m, {}).get('score', float('nan')) * 100
                        for e in eval_history]
             ax.plot(eval_iters, per_map, color=map_color[m], lw=1.2,
                     marker='o', markersize=4, alpha=0.75, label=m)
-        # Aggregate mean
-        mean_series = [e.get('mean_win_rate', float('nan')) * 100
+        # Aggregate mean score
+        mean_series = [e.get('mean_score', float('nan')) * 100
                        for e in eval_history]
         ax.plot(eval_iters, mean_series, color=C_MEAN_EVAL, lw=2.5,
                 marker='s', markersize=8, markerfacecolor=_SURFACE,
                 markeredgewidth=2, markeredgecolor=C_MEAN_EVAL,
-                label='MEAN', zorder=5)
+                label='MEAN score', zorder=5)
+        # Aggregate mean draw-rate
+        draw_series = [e.get('mean_draw_rate', float('nan')) * 100
+                       for e in eval_history]
+        ax.plot(eval_iters, draw_series, color=C_DRAW, lw=2, linestyle=':',
+                marker='^', markersize=6, label='MEAN draw %', zorder=4)
     ax.axhline(50, color=_INK_MUTED, lw=1, linestyle='--', alpha=0.6, zorder=1)
     ax.text(min(iters) if iters else 0, 51.5, '50 %',
             color=_INK_MUTED, fontsize=9, va='bottom')
     ax.set_ylim(0, 100)
-    ax.set_ylabel('% vs MCTS(uniform)', color=_INK_SECONDARY, fontsize=11)
+    ax.set_ylabel('score (wins + 0.5·draws) / n  [%]',
+                  color=_INK_SECONDARY, fontsize=11)
     ax.set_title('Eval per map: MCTS+GNN vs MCTS(uniform) at same budget',
                  color=_INK_PRIMARY, fontsize=13, fontweight='bold', pad=6)
     ax.legend(frameon=True, facecolor=_SURFACE, edgecolor=_GRIDLINE,
@@ -253,7 +235,7 @@ def plot_dashboard(metrics: Dict[str, list],
     ax.set_title('Self-play sanity: outcome mix (aggregated) + game length',
                  color=_INK_PRIMARY, fontsize=13, fontweight='bold', pad=6)
 
-    fig.suptitle('ExIt training run — 9-map cold-start',
+    fig.suptitle(f'ExIt training run — {len(map_names)} maps',
                  color=_INK_PRIMARY, fontsize=14, fontweight='bold')
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(output_path, dpi=150, facecolor=_SURFACE)
@@ -309,10 +291,28 @@ def main():
     parser.add_argument('--output-dir',
                         default='experiments/mcts_gnn_exit_training_run')
     parser.add_argument('--map-names', type=str, default=None,
-                        help='Comma-separated list; defaults to the 9 unique maps.')
+                        help='Comma-separated list, or "all" for every registered '
+                             'map (basic_6 alias excluded); defaults to the 9 '
+                             'unique small maps.')
+    parser.add_argument('--action-budget', type=int, default=5,
+                        help='K: actions per turn for both self-play and eval.')
     parser.add_argument('--num-iterations', type=int, default=50)
     parser.add_argument('--num-games-per-iter', type=int, default=72)
     parser.add_argument('--num-workers', type=int, default=8)
+    parser.add_argument('--games-per-worker', type=int, default=16,
+                        help='Games a worker advances in lockstep, sharing one batched '
+                             'GNN forward per round. 1 = the old one-game-at-a-time worker.')
+    parser.add_argument('--pw-sampler', default='masked_random',
+                        choices=['masked_random', 'gnn'],
+                        help="Where progressive widening draws candidate actions. "
+                             "'masked_random' (default) samples uniformly from the valid "
+                             "joint space, so at K=10 on a 20+ territory map the tree never "
+                             "contains the policy's preferred action. 'gnn' draws candidates "
+                             "from the policy, AlphaZero-style. Applies to self-play AND eval.")
+    parser.add_argument('--selfplay-device', default='cpu',
+                        help="Where the batched self-play forwards run. Keep 'cpu': our "
+                             'graphs are tiny and 12 CUDA contexts serialize on one device '
+                             '(measured 4x slower). See configs/mcts_gnn_exit.yaml.')
     parser.add_argument('--num-epochs', type=int, default=4)
     parser.add_argument('--mcts-budget', type=int, default=40)
     parser.add_argument('--max-turns', type=int, default=40)
@@ -342,8 +342,13 @@ def main():
                              'still trained via MSE. Eval always uses value head.')
     args = parser.parse_args()
 
-    map_names = ([m.strip() for m in args.map_names.split(',')]
-                 if args.map_names else list(DEFAULT_MAPS))
+    if args.map_names is None:
+        map_names = list(DEFAULT_MAPS)
+    elif args.map_names.strip().lower() == 'all':
+        map_names = sorted(m for m in MapRegistry.list_maps() if m != 'basic_6')
+    else:
+        map_names = [m.strip() for m in args.map_names.split(',')]
+    K = args.action_budget
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -355,8 +360,8 @@ def main():
     print("=" * 70)
     print(f"  iterations={args.num_iterations}  games/iter={args.num_games_per_iter}  "
           f"workers={args.num_workers}  epochs/iter={args.num_epochs}")
-    print(f"  mcts_budget={args.mcts_budget}  max_turns={args.max_turns}  "
-          f"eval every {args.eval_interval} iters "
+    print(f"  mcts_budget={args.mcts_budget}  action_budget K={K}  "
+          f"max_turns={args.max_turns}  eval every {args.eval_interval} iters "
           f"({args.num_eval_games} games/map, {args.eval_workers} workers)")
     print(f"  model: hidden={args.hidden_dim} layers={args.num_layers}  "
           f"trainer device={'GPU' if args.use_gpu else 'CPU'}")
@@ -366,7 +371,7 @@ def main():
 
     trainer_cfg = {
         'env': {'map_names': map_names, 'max_turns': args.max_turns,
-                'action_budget': 5},
+                'action_budget': K},
         'model': {'type': 'gcn', 'hidden_dim': args.hidden_dim,
                   'num_layers': args.num_layers, 'dropout': 0.1},
         'trainer': {
@@ -396,8 +401,8 @@ def main():
         'simulation_budget': args.mcts_budget,
         'c_puct': 1.4, 'uct_c': 1.41, 'pw_alpha': 0.5,
         'max_rollout_turns': args.max_turns,
-        'action_budget': 5,
-        'pw_sampler': 'masked_random',
+        'action_budget': K,
+        'pw_sampler': args.pw_sampler,
         'use_value_fn': args.use_value_fn,
     }
     self_play_config = {
@@ -425,6 +430,8 @@ def main():
             num_workers=args.num_workers,
             base_seed=it * 10000,
             max_regions=trainer.max_regions,
+            games_per_worker=args.games_per_worker,
+            device=args.selfplay_device,
         )
         collect_s = time.perf_counter() - t0
 
@@ -466,24 +473,31 @@ def main():
                 model_kwargs=trainer.model_kwargs(),
                 map_names=map_names,
                 max_turns=args.max_turns,
-                action_budget=5,
+                action_budget=K,
                 mcts_budget=args.mcts_budget,
                 num_games_per_map=args.num_eval_games,
-                num_workers=min(args.eval_workers, len(map_names)),
+                num_workers=args.eval_workers,
                 max_regions=trainer.max_regions,
                 base_seed=100000 + (it + 1) * 137,
+                pw_sampler=args.pw_sampler,
             )
             eval_s = time.perf_counter() - t2
             mean_wr = float(np.mean([per_map[m]['win_rate'] for m in map_names]))
+            mean_score = float(np.mean([per_map[m]['score'] for m in map_names]))
+            mean_draw = float(np.mean([per_map[m]['draw_rate'] for m in map_names]))
             eval_history.append({
                 'iteration': it + 1,
                 'per_map': per_map,
                 'mean_win_rate': mean_wr,
+                'mean_score': mean_score,
+                'mean_draw_rate': mean_draw,
                 'eval_time_s': eval_s,
             })
-            per_map_summary = '  '.join(f"{m}={per_map[m]['win_rate']:.0%}"
-                                        for m in map_names)
-            print(f"    [eval @ iter {it+1}]  mean={mean_wr:.2%}  "
+            per_map_summary = '  '.join(
+                f"{m}={per_map[m]['score']:.0%}(d{per_map[m]['draws']})"
+                for m in map_names)
+            print(f"    [eval @ iter {it+1}]  mean_score={mean_score:.2%}  "
+                  f"mean_win={mean_wr:.2%}  mean_draw={mean_draw:.2%}  "
                   f"({per_map_summary})  eval_time={eval_s:.1f}s")
 
         if (it + 1) % args.checkpoint_interval == 0:
@@ -514,9 +528,9 @@ def main():
 
     print(f"\nTotal wall-clock: {run_s/60:.1f} min")
     if eval_history:
-        first_mean = eval_history[0]['mean_win_rate']
-        last_mean = eval_history[-1]['mean_win_rate']
-        print(f"Mean eval win-rate: first={first_mean:.2%}  last={last_mean:.2%}  "
+        first_mean = eval_history[0]['mean_score']
+        last_mean = eval_history[-1]['mean_score']
+        print(f"Mean eval score: first={first_mean:.2%}  last={last_mean:.2%}  "
               f"delta={(last_mean - first_mean):+.2%}")
 
 

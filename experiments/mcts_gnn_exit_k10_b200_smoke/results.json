@@ -1,0 +1,286 @@
+{
+  "timestamp": "2026-09-09T12:15:21.576002",
+  "wall_clock_s": 2146.1740151997656,
+  "args": {
+    "output_dir": "experiments/mcts_gnn_exit_k10_b200_smoke",
+    "map_names": "all",
+    "action_budget": 10,
+    "num_iterations": 2,
+    "num_games_per_iter": 48,
+    "num_workers": 12,
+    "num_epochs": 4,
+    "mcts_budget": 200,
+    "max_turns": 40,
+    "eval_interval": 2,
+    "num_eval_games": 4,
+    "eval_workers": 12,
+    "use_gpu": true,
+    "hidden_dim": 128,
+    "num_layers": 3,
+    "checkpoint_interval": 2,
+    "resume": "experiments/k_sweep_ppo_200/K10/checkpoints/final.pt",
+    "reset_optimizer": true,
+    "use_value_fn": true
+  },
+  "map_names": [
+    "bipartite_20",
+    "corridor_20",
+    "corridor_22",
+    "corridor_28",
+    "dense_12",
+    "dense_mesh_16",
+    "double_hub_8",
+    "dual_hub_20",
+    "grid_20",
+    "grid_30",
+    "hex_grid_10",
+    "hex_grid_18",
+    "hub_ring_30",
+    "hub_spoke_16",
+    "large_10",
+    "medium_8",
+    "ring_6",
+    "ring_cross_18",
+    "simple_6",
+    "star_8",
+    "triangle_6"
+  ],
+  "metrics": {
+    "iteration": [
+      1,
+      2
+    ],
+    "policy_loss": [
+      -1.6329463720321655,
+      -0.4043651521205902
+    ],
+    "value_loss": [
+      0.1937008798122406,
+      0.17394134402275085
+    ],
+    "total_loss": [
+      -1.4749375581741333,
+      -0.2652379274368286
+    ],
+    "selfplay_win_frac": [
+      0.3684210526315789,
+      0.36
+    ],
+    "selfplay_draw_frac": [
+      0.3684210526315789,
+      0.48
+    ],
+    "avg_game_length": [
+      89.78947368421052,
+      66.44
+    ],
+    "collect_s": [
+      434.1682576001622,
+      432.46109260013327
+    ],
+    "train_s": [
+      3.4348165998235345,
+      2.451174400281161
+    ]
+  },
+  "eval_history": [
+    {
+      "iteration": 2,
+      "per_map": {
+        "bipartite_20": {
+          "wins": 0,
+          "losses": 0,
+          "draws": 4,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 1.0,
+          "score": 0.5
+        },
+        "corridor_20": {
+          "wins": 0,
+          "losses": 0,
+          "draws": 4,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 1.0,
+          "score": 0.5
+        },
+        "corridor_22": {
+          "wins": 0,
+          "losses": 0,
+          "draws": 4,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 1.0,
+          "score": 0.5
+        },
+        "corridor_28": {
+          "wins": 0,
+          "losses": 0,
+          "draws": 4,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 1.0,
+          "score": 0.5
+        },
+        "dense_12": {
+          "wins": 0,
+          "losses": 3,
+          "draws": 1,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 0.25,
+          "score": 0.125
+        },
+        "dense_mesh_16": {
+          "wins": 0,
+          "losses": 3,
+          "draws": 1,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 0.25,
+          "score": 0.125
+        },
+        "double_hub_8": {
+          "wins": 1,
+          "losses": 3,
+          "draws": 0,
+          "total": 4,
+          "win_rate": 0.25,
+          "draw_rate": 0.0,
+          "score": 0.25
+        },
+        "dual_hub_20": {
+          "wins": 0,
+          "losses": 0,
+          "draws": 4,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 1.0,
+          "score": 0.5
+        },
+        "grid_20": {
+          "wins": 0,
+          "losses": 0,
+          "draws": 4,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 1.0,
+          "score": 0.5
+        },
+        "grid_30": {
+          "wins": 0,
+          "losses": 0,
+          "draws": 4,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 1.0,
+          "score": 0.5
+        },
+        "hex_grid_10": {
+          "wins": 0,
+          "losses": 2,
+          "draws": 2,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 0.5,
+          "score": 0.25
+        },
+        "hex_grid_18": {
+          "wins": 1,
+          "losses": 1,
+          "draws": 2,
+          "total": 4,
+          "win_rate": 0.25,
+          "draw_rate": 0.5,
+          "score": 0.5
+        },
+        "hub_ring_30": {
+          "wins": 0,
+          "losses": 0,
+          "draws": 4,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 1.0,
+          "score": 0.5
+        },
+        "hub_spoke_16": {
+          "wins": 0,
+          "losses": 1,
+          "draws": 3,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 0.75,
+          "score": 0.375
+        },
+        "large_10": {
+          "wins": 2,
+          "losses": 1,
+          "draws": 1,
+          "total": 4,
+          "win_rate": 0.5,
+          "draw_rate": 0.25,
+          "score": 0.625
+        },
+        "medium_8": {
+          "wins": 0,
+          "losses": 1,
+          "draws": 3,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 0.75,
+          "score": 0.375
+        },
+        "ring_6": {
+          "wins": 2,
+          "losses": 2,
+          "draws": 0,
+          "total": 4,
+          "win_rate": 0.5,
+          "draw_rate": 0.0,
+          "score": 0.5
+        },
+        "ring_cross_18": {
+          "wins": 0,
+          "losses": 0,
+          "draws": 4,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 1.0,
+          "score": 0.5
+        },
+        "simple_6": {
+          "wins": 1,
+          "losses": 3,
+          "draws": 0,
+          "total": 4,
+          "win_rate": 0.25,
+          "draw_rate": 0.0,
+          "score": 0.25
+        },
+        "star_8": {
+          "wins": 0,
+          "losses": 3,
+          "draws": 1,
+          "total": 4,
+          "win_rate": 0.0,
+          "draw_rate": 0.25,
+          "score": 0.125
+        },
+        "triangle_6": {
+          "wins": 1,
+          "losses": 3,
+          "draws": 0,
+          "total": 4,
+          "win_rate": 0.25,
+          "draw_rate": 0.0,
+          "score": 0.25
+        }
+      },
+      "mean_win_rate": 0.09523809523809523,
+      "mean_score": 0.39285714285714285,
+      "mean_draw_rate": 0.5952380952380952,
+      "eval_time_s": 1273.6056540999562
+    }
+  ]
+}

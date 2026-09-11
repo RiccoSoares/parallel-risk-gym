@@ -10,6 +10,7 @@ Verifies that:
 
 import sys
 import numpy as np
+import torch  # noqa: F401  -- must precede ray on Windows or torch's c10.dll fails to load
 
 from parallel_risk.training.rllib.wrapper import RLlibParallelRiskEnv, make_rllib_env
 from parallel_risk.env.reward_shaping import create_dense_config

@@ -16,7 +16,9 @@ model:
 
 training:
   # Reduced batch size for faster iterations with parallel collection
-  batch_size: 1024          # Environment steps per update (split across workers)
+  batch_size: 1024          # Samples per update (2 per env step; split across workers)
+  num_envs: 16              # Envs stepped in lockstep per rollout process (see gnn_gcn.yaml)
+  rollout_device: "cpu"     # "cuda": collect in-process on the GPU (needs use_gpu: true)
   minibatch_size: 128       # Samples per minibatch (shuffled within each epoch)
   num_epochs: 4             # SGD epochs per batch (reduced for speed)
   learning_rate: 3.0e-4     # Slightly higher LR with smaller batches

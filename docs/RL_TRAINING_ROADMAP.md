@@ -174,8 +174,16 @@ All committed on `mcts_gnn_selfplay`. Smoke tests in `tests/test_mcts_gnn_{agent
 - [x] Warm-start ExIt shows real learning on 8 maps (+4-17pp per-map)
 - [ ] **Convergence run** on all 9 maps with 200 iters — in progress
 - [ ] **Raw GNN policy** (no MCTS) from ExIt training evaluated vs MCTS-50 to compare against Phase 2.4 numbers (94/100/98%)
+- [x] **MCTS+GNN beats MCTS-uniform at EQUAL budget** — 2026-09-11: 0.851 over 21 maps
+      (73% outright wins) at budget 200, K=10, after fixing progressive widening to
+      propose from the policy (EXPERIMENT_LOG.md §10-§11). The earlier same-budget
+      ceiling was an artifact of random candidate proposal, not a property of MCTS+GNN.
 - [ ] **Compute-efficiency metric**: MCTS(GNN, budget=40) vs MCTS(uniform, budget=200) — roadmap's actual "4× efficiency" success criterion. Meaningful because at budget=40 alone MCTS caps a good policy; a stronger opponent gives the GNN room to earn its keep.
-- [ ] Cold-start bootstrap via higher MCTS budget (200+) as a follow-up experiment — the honest test of whether AZ/ExIt can escape cold-start on this game at feasible compute.
+- [x] Cold-start bootstrap via higher MCTS budget (200+) — **answered 2026-09-10**: at
+  budget 200 with K=10, cold-start ExIt escapes the draw regime (self-play draws ~45%,
+  not ~100%) and improves 0.179 -> 0.274 over 50 iterations (~2.6 SE) on the 14
+  informative maps. See EXPERIMENT_LOG.md §9. Caveat: it plateaus far below parity
+  with MCTS-uniform at the same budget, as does the warm start (0.390).
 
 ---
 

@@ -5,7 +5,10 @@ Plays games with an `MCTSGNNAgent` acting for both sides and records
 by `MCTSGNNTrainer`.
 
 Parallel worker mirrors the spawn-based pattern in
-`parallel_risk/training/torchrl/train.py::_rollout_worker`.
+`parallel_risk/training/torchrl/train.py::_rollout_worker`. With
+`games_per_worker > 1` (or a CUDA device) `collect_games` runs each
+worker's games in lockstep through `parallel_risk/training/mcts_gnn/lockstep.py`,
+so the GNN forwards of all its games share one batch.
 """
 
 from __future__ import annotations
@@ -30,27 +33,18 @@ def _temperature(turn: int, temperature_turns: int,
 # Single-episode driver (uses an MCTSGNNAgent directly)
 # ---------------------------------------------------------------------------
 
-def play_episode(mcts_gnn_agent, env, self_play_config: Dict[str, Any],
-                 map_name: str) -> List[Dict[str, Any]]:
-    """Play one self-play game and return training examples.
+def play_episode_gen(mcts_gnn_agent, env, self_play_config: Dict[str, Any],
+                     map_name: str, seed: int = None, rng=None):
+    """Generator form of `play_episode`: the same game, step by step.
 
-    Args:
-        mcts_gnn_agent: Constructed `MCTSGNNAgent` (both agents share it).
-        env: A raw `ParallelRiskEnv` — reward shaping should be disabled so
-             the terminal reward is exactly ±1 or 0 (the value target).
-        self_play_config: Dict with keys `dirichlet_alpha`, `noise_frac`,
-             `temperature_turns`, `max_temperature`.
-        map_name: Recorded on each example for per-map bookkeeping.
-
-    Returns:
-        List of example dicts, one per (agent, turn):
-            {
-                'graph': PyG Data,     # agent-relative graph obs BEFORE the turn
-                'agent_id': str,
-                'visit_dist': dict[tuple, float],
-                'map_name': str,
-                'z': float,            # +1 winner, -1 loser, 0 draw
-            }
+    Yields the search's evaluation requests (lists of (game_state, agent_id)
+    graphs the agent's evaluator has not cached; see `DuctMCTS.search_gen`)
+    and returns the examples once the game is over. `seed` is passed to
+    `env.reset`, which seeds python `random` (the env's action shuffle) and
+    `np.random` (samplers, temperature sampling); `rng` is the numpy
+    Generator for the Dirichlet root noise (None: a fresh, unseeded
+    default_rng per turn, as before). The lockstep driver passes both so
+    every game is reproducible on its own.
     """
     from parallel_risk.training.torchrl.graph_wrapper import env_to_graph
 
@@ -67,7 +61,7 @@ def play_episode(mcts_gnn_agent, env, self_play_config: Dict[str, Any],
 
     examples: List[Dict[str, Any]] = []
 
-    obs, _ = env.reset()
+    obs, _ = env.reset(seed=seed)
     rewards = {a: 0.0 for a in env.possible_agents}
     done = False
     turn = 0
@@ -75,12 +69,12 @@ def play_episode(mcts_gnn_agent, env, self_play_config: Dict[str, Any],
     while not done:
         temp = _temperature(turn, temperature_turns, max_temperature)
 
-        root = mcts.make_root(env.game_state)
+        root = yield from mcts.make_root_gen(env.game_state)
         if noise_frac > 0.0:
-            mcts.apply_root_dirichlet(root, alpha=dirichlet_alpha,
-                                      noise_frac=noise_frac,
-                                      min_actions=dirichlet_min_actions)
-        mcts.run(root, mcts_gnn_agent.simulation_budget)
+            yield from mcts.apply_root_dirichlet_gen(
+                root, alpha=dirichlet_alpha, noise_frac=noise_frac,
+                min_actions=dirichlet_min_actions, rng=rng)
+        yield from mcts.search_gen(root, mcts_gnn_agent.simulation_budget)
 
         joint_action = {}
         for agent_id in ('agent_0', 'agent_1'):
@@ -110,6 +104,38 @@ def play_episode(mcts_gnn_agent, env, self_play_config: Dict[str, Any],
         ex['z'] = z_by_agent.get(ex['agent_id'], 0.0)
 
     return examples
+
+
+def play_episode(mcts_gnn_agent, env, self_play_config: Dict[str, Any],
+                 map_name: str, seed: int = None, rng=None) -> List[Dict[str, Any]]:
+    """Play one self-play game and return training examples.
+
+    Args:
+        mcts_gnn_agent: Constructed `MCTSGNNAgent` (both agents share it).
+        env: A raw `ParallelRiskEnv` — reward shaping should be disabled so
+             the terminal reward is exactly ±1 or 0 (the value target).
+        self_play_config: Dict with keys `dirichlet_alpha`, `noise_frac`,
+             `temperature_turns`, `max_temperature`.
+        map_name: Recorded on each example for per-map bookkeeping.
+        seed, rng: see `play_episode_gen`; None (default) keeps the original
+             behaviour (no reseed, fresh Dirichlet generator).
+
+    Returns:
+        List of example dicts, one per (agent, turn):
+            {
+                'graph': PyG Data,     # agent-relative graph obs BEFORE the turn
+                'agent_id': str,
+                'visit_dist': dict[tuple, float],
+                'map_name': str,
+                'z': float,            # +1 winner, -1 loser, 0 draw
+            }
+
+    Runs `play_episode_gen` on the synchronous path: every evaluation
+    request is served at once by the agent's evaluator with a single-graph
+    forward, so the numbers are exactly those of the unbatched search.
+    """
+    return mcts_gnn_agent.mcts.drive(play_episode_gen(
+        mcts_gnn_agent, env, self_play_config, map_name, seed=seed, rng=rng))
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +230,9 @@ def _self_play_worker(args):
 def collect_games(policy, model_kwargs, env_configs, mcts_config,
                   self_play_config, num_games: int, num_workers: int,
                   base_seed: int = 0,
-                  max_regions: int = None) -> List[Dict[str, Any]]:
+                  max_regions: int = None,
+                  games_per_worker: int = 1,
+                  device: str = 'cpu') -> List[Dict[str, Any]]:
     """Collect `num_games` self-play episodes across `num_workers` processes.
 
     The trainer's policy is snapshotted to CPU once, then handed to each
@@ -214,22 +242,45 @@ def collect_games(policy, model_kwargs, env_configs, mcts_config,
     `max_regions` should match the trainer's padding when the map set
     contains maps with different region counts. Defaults to None (each
     worker pads to its own map's region count — single-map only).
+
+    games_per_worker: games each worker keeps in flight. 1 (default) on the
+        CPU is the original one-game-at-a-time worker, unchanged. Otherwise
+        every worker plays its share of the games in lockstep
+        (`parallel_risk/training/mcts_gnn/lockstep.py`): one batched GNN
+        forward per round serves all of them.
+    device: 'cpu', 'cuda' or 'auto' (cuda if available) — where the lockstep
+        workers' batched forwards run; each worker owns its own CUDA context.
+        A non-CPU device implies the lockstep path even with games_per_worker=1.
     """
+    from parallel_risk.training.mcts_gnn.lockstep import (
+        resolve_device, self_play_lockstep_worker)
+
+    device = resolve_device(device)
     state_dict_cpu = {k: v.detach().cpu() for k, v in policy.state_dict().items()}
 
     per_worker = max(1, num_games // max(1, num_workers))
-    worker_args = [
-        (state_dict_cpu, model_kwargs, env_configs, mcts_config,
-         self_play_config, per_worker, base_seed + i * 1000, max_regions)
-        for i in range(max(1, num_workers))
-    ]
+    if games_per_worker > 1 or device != 'cpu':
+        worker = self_play_lockstep_worker
+        worker_args = [
+            (state_dict_cpu, model_kwargs, env_configs, mcts_config,
+             self_play_config, per_worker, base_seed + i * 1000, max_regions,
+             games_per_worker, device, 'az')
+            for i in range(max(1, num_workers))
+        ]
+    else:
+        worker = _self_play_worker
+        worker_args = [
+            (state_dict_cpu, model_kwargs, env_configs, mcts_config,
+             self_play_config, per_worker, base_seed + i * 1000, max_regions)
+            for i in range(max(1, num_workers))
+        ]
 
     if num_workers <= 1:
-        return _self_play_worker(worker_args[0])
+        return worker(worker_args[0])
 
     ctx = mp.get_context('spawn')
     with ctx.Pool(processes=num_workers) as pool:
-        results = pool.map(_self_play_worker, worker_args)
+        results = pool.map(worker, worker_args)
 
     flat: List[Dict[str, Any]] = []
     for r in results:
