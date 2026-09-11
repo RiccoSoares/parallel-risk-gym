@@ -470,17 +470,33 @@ class MCTSGNNAgent:
         pair_agents: bool = False,
     ):
         """
-        pw_sampler:
-            - 'masked_random' (default): use MaskedRandomAgentRLlib for tree
-              exploration (progressive widening + root seed). GNN is still
-              used as the PUCT prior (via `policy_fn`) and leaf evaluator
-              (via `value_fn`, when enabled). Matches AlphaZero's separation
-              of "explorer" and "evaluator" and gives the tree the same
-              exploration breadth as vanilla MCTS.
-            - 'gnn': use GNNActionSampler for PW (older behavior). At
-              random init the GNN produces peaked distributions and PW
-              barely widens beyond 1-2 modal actions, which severely
-              handicaps MCTS+GNN vs MCTS(uniform) at low budget.
+        pw_sampler: where progressive widening draws candidate actions. This
+            is the single most consequential setting on this class — see
+            docs/EXPERIMENT_LOG.md §10.
+
+            - 'masked_random' (default): MaskedRandomAgentRLlib proposes
+              candidates; the GNN only ranks them (PUCT prior) and evaluates
+              leaves. **With a trained policy this badly handicaps the
+              search.** Widening gives `visits ** pw_alpha` candidates, so a
+              budget-200 root holds ~14 uniformly random joint actions per
+              agent. At K=10 on a 20-30 territory map the joint space is
+              astronomically large and that pool never lands near the
+              policy's mode: measured over 25 states, the policy's own
+              action was +11.9 nats more probable than the best of 14 random
+              candidates on grid_20 (random never won in 25 states), versus
+              +0.85 nats on simple_6, where random sampling does cover the
+              space. The network cannot select an action the tree does not
+              contain.
+            - 'gnn': GNNActionSampler proposes candidates, i.e. the policy
+              expands its own children the way AlphaZero does. Measured on
+              the K=10 PPO checkpoint at budget 200 against
+              MCTS-uniform(200), 8 maps x 12 games, changing only this
+              flag: mean score 0.458 -> 0.802 (large_10 0.375 -> 1.000,
+              hex_grid_18 0.292 -> 0.708, simple_6 0.417 -> 0.667). Costs a
+              network forward per candidate: 3.9 s per decision vs 0.85 s.
+              The default is left at 'masked_random' only because a
+              *cold-start* policy is peaked on noise and would widen poorly;
+              for any trained or warm-started policy prefer 'gnn'.
 
         use_value_fn:
             - True (default): use the GNN value head as the leaf evaluator.

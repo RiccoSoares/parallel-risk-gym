@@ -21,6 +21,14 @@ mcts:
   uct_c: 1.41               # UCT constant (unused when policy_fn is set, but kept for reproducibility)
   pw_alpha: 0.5             # progressive-widening exponent
   max_rollout_turns: 20     # only used if value_fn falls back to rollout (never here)
+  # pw_sampler: where progressive widening draws candidates. 'masked_random' lets the
+  # GNN only RANK ~14 random joint actions per root at budget 200, which at K=10 on
+  # 20+ territory maps never contains the policy's preferred action. Switching to 'gnn'
+  # (policy proposes its own children, AlphaZero-style) moved the same checkpoint from
+  # 0.458 to 0.802 against MCTS-uniform(200) with no training. See EXPERIMENT_LOG.md 10.
+  # Costs a forward per candidate (3.9 s/decision vs 0.85 s). Prefer 'gnn' when warm
+  # starting; 'masked_random' only makes sense from random init.
+  pw_sampler: masked_random
 
 self_play:
   num_games_per_iteration: 32
